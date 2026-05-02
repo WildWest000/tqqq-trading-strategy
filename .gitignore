@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+venv/
+data/*.csv
+paper_trade/.env
+paper_trade/state.json
+paper_trade/logs/
+paper_trade/run_bot.sh
+*.log
+.DS_Store

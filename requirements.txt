@@ -1,0 +1,6 @@
+pandas>=2.0
+numpy>=1.24
+yfinance>=0.2.30
+plotly>=5.18
+dash>=2.14
+dash-bootstrap-components>=1.5

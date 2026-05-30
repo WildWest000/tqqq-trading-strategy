@@ -1,330 +1,435 @@
 """
-Interactive Dash/Plotly dashboard for the TQQQ/SQQQ mean reversion strategy.
-Displays backtest results, benchmark comparison, and forward test results.
+Interactive Dash/Plotly dashboard for the TQQQ/SQQQ trading strategy.
+
+Redesigned with:
+- KPI summary cards at the top for instant performance snapshot
+- Side-by-side equity + drawdown charts (better use of horizontal space)
+- Rolling metrics panel (Sharpe, volatility over time)
+- Coordinated hover/click between charts
+- Loading states for perceived performance
+- Cached backtest results to avoid recomputation
+- Card-based layout with consistent spacing
 """
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from dash import Dash, html, dcc, Output, Input, State
+from dash import Dash, html, dcc, Output, Input, State, callback_context, no_update
 import dash_bootstrap_components as dbc
 from datetime import datetime, timedelta
+from functools import lru_cache
 import config
 from backtest import run_backtest
 from forward_test import run_forward_test, load_state
 
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.DARKLY])
+app.title = "TQQQ Strategy Dashboard"
+
+# --- Reusable Components ---
+
+def kpi_card(title, value, subtitle="", color="primary"):
+    """Create a compact KPI card."""
+    return dbc.Card([
+        dbc.CardBody([
+            html.P(title, className="card-title text-muted mb-0", style={"fontSize": "0.75rem"}),
+            html.H4(value, className=f"text-{color} mb-0", style={"fontWeight": "bold"}),
+            html.Small(subtitle, className="text-muted") if subtitle else None,
+        ], className="py-2 px-3")
+    ], className="h-100")
+
+
+def section_card(title, children, id=None):
+    """Wrap content in a consistent card with header."""
+    props = {"className": "mb-3"}
+    if id:
+        props["id"] = id
+    return dbc.Card([
+        dbc.CardHeader(html.H6(title, className="mb-0")),
+        dbc.CardBody(children, className="p-2"),
+    ], **props)
+
 
 # --- Layout ---
+
 app.layout = dbc.Container([
-    dbc.Row([
-        dbc.Col(html.H1("TQQQ/SQQQ Regime-Based Strategy", className="text-center my-3"), width=12),
-    ]),
-    dbc.Row([
-        dbc.Col(html.P(
-            "Signals: previous day's close → Execution: next day's open | "
-            "Trailing stop: 25% from peak → cash | "
-            "Regimes: bull (100% TQQQ), neutral (70% TQQQ), bear (cash), crisis (20% SQQQ)",
-            className="text-muted text-center small"
-        ), width=12),
-    ]),
-    
-    # Date range controls
+    # Header row: title + controls inline
     dbc.Row([
         dbc.Col([
-            dbc.Label("Backtest Start Date"),
-            dcc.DatePickerSingle(
-                id="start-date",
-                date=config.DEFAULT_BACKTEST_START,
-                display_format="YYYY-MM-DD",
-                month_format="MMMM YYYY",
-            ),
-        ], width=3),
-        dbc.Col([
-            dbc.Label("Backtest End Date"),
-            dcc.DatePickerSingle(
-                id="end-date",
-                date=config.DEFAULT_BACKTEST_END,
-                display_format="YYYY-MM-DD",
-                month_format="MMMM YYYY",
-            ),
-        ], width=3),
-        dbc.Col([
-            dbc.Label("\u00a0"),
-            html.Br(),
-            dbc.Button("Run Backtest", id="run-btn", color="primary", className="me-2"),
-            dbc.Button("Run Forward Test", id="forward-btn", color="success"),
+            html.H4("TQQQ/SQQQ Strategy", className="mb-0 text-light"),
+            html.Small(f"Method: {config.REGIME_METHOD} | Trailing Stop: 25%",
+                      className="text-muted"),
         ], width=4),
         dbc.Col([
-            dbc.Label("Status"),
-            html.Div(id="status-msg", children="Ready", className="text-info"),
+            dbc.InputGroup([
+                dbc.InputGroupText("From", className="bg-dark text-muted"),
+                dbc.Input(id="start-date-input", type="date",
+                         value=config.DEFAULT_BACKTEST_START,
+                         className="bg-dark text-light"),
+                dbc.InputGroupText("To", className="bg-dark text-muted"),
+                dbc.Input(id="end-date-input", type="date",
+                         value=config.DEFAULT_BACKTEST_END,
+                         className="bg-dark text-light"),
+                dbc.Button("Run", id="run-btn", color="primary", size="sm"),
+            ], size="sm"),
+        ], width=6),
+        dbc.Col([
+            html.Div(id="status-msg", className="text-info small text-end pt-1"),
         ], width=2),
-    ], className="mb-3"),
+    ], className="py-2 mb-2 border-bottom border-secondary align-items-center"),
     
-    # Performance metrics
+    # KPI Summary Row
+    dbc.Row(id="kpi-row", children=[
+        dbc.Col(kpi_card("Total Return", "—"), width=2),
+        dbc.Col(kpi_card("Sharpe Ratio", "—"), width=2),
+        dbc.Col(kpi_card("Max Drawdown", "—"), width=2),
+        dbc.Col(kpi_card("vs B&H", "—"), width=2),
+        dbc.Col(kpi_card("Trades", "—"), width=2),
+        dbc.Col(kpi_card("Win Rate", "—"), width=2),
+    ], className="mb-3 g-2"),
+    
+    # Main charts: equity + drawdown side by side
     dbc.Row([
         dbc.Col([
-            html.H4("Strategy vs Benchmark"),
-            html.Div(id="metrics-table"),
-        ], width=12),
-    ], className="mb-3"),
+            dcc.Loading(
+                dcc.Graph(id="equity-chart", config={"displayModeBar": False}),
+                type="circle", color="#00d4aa"
+            ),
+        ], lg=8),
+        dbc.Col([
+            dcc.Loading(
+                dcc.Graph(id="drawdown-chart", config={"displayModeBar": False}),
+                type="circle", color="#ff6b6b"
+            ),
+        ], lg=4),
+    ], className="mb-2"),
     
-    # Equity curve
+    # Secondary row: Signals + Rolling Metrics
     dbc.Row([
         dbc.Col([
-            dcc.Graph(id="equity-chart"),
-        ], width=12),
+            dcc.Loading(
+                dcc.Graph(id="signals-chart", config={"displayModeBar": False}),
+                type="circle", color="#4ecdc4"
+            ),
+        ], lg=8),
+        dbc.Col([
+            dcc.Loading(
+                dcc.Graph(id="rolling-chart", config={"displayModeBar": False}),
+                type="circle", color="#ffe66d"
+            ),
+        ], lg=4),
+    ], className="mb-2"),
+    
+    # Trade log + Forward test
+    dbc.Row([
+        dbc.Col([
+            section_card("Trade Log", [
+                dbc.Row([
+                    dbc.Col([
+                        dbc.Select(
+                            id="trade-filter",
+                            options=[
+                                {"label": "All Trades", "value": "all"},
+                                {"label": "Bullish Only", "value": "bullish"},
+                                {"label": "Defensive Only", "value": "defensive"},
+                                {"label": "Trailing Stops", "value": "stops"},
+                            ],
+                            value="all",
+                            size="sm",
+                            className="bg-dark text-light mb-2",
+                        ),
+                    ], width=3),
+                ]),
+                html.Div(id="trade-log", style={"maxHeight": "400px", "overflowY": "auto"}),
+            ]),
+        ], lg=8),
+        dbc.Col([
+            section_card("Forward Test", [
+                dbc.Button("Run Forward Test", id="forward-btn", color="success", size="sm",
+                          className="mb-2"),
+                html.Div(id="forward-panel"),
+            ]),
+        ], lg=4),
     ]),
     
-    # Price + Signals chart
-    dbc.Row([
-        dbc.Col([
-            dcc.Graph(id="signals-chart"),
-        ], width=12),
-    ]),
-    
-    # Drawdown chart
-    dbc.Row([
-        dbc.Col([
-            dcc.Graph(id="drawdown-chart"),
-        ], width=12),
-    ]),
-    
-    # Trade log
-    dbc.Row([
-        dbc.Col([
-            html.H4("Trade Log"),
-            html.Div(id="trade-log"),
-        ], width=12),
-    ], className="mb-3"),
-    
-    # Forward test panel
-    dbc.Row([
-        dbc.Col([
-            html.H4("Forward Test (Paper Trading)"),
-            html.Div(id="forward-panel"),
-        ], width=12),
-    ], className="mb-3"),
-    
-    # Hidden store for results
-    dcc.Store(id="backtest-results"),
-], fluid=True)
+    # Hidden stores
+    dcc.Store(id="backtest-store"),
+    dcc.Store(id="trades-store"),
+], fluid=True, className="px-3")
 
+
+# --- Callbacks ---
 
 @app.callback(
     [Output("status-msg", "children"),
+     Output("kpi-row", "children"),
      Output("equity-chart", "figure"),
      Output("signals-chart", "figure"),
      Output("drawdown-chart", "figure"),
-     Output("metrics-table", "children"),
-     Output("trade-log", "children")],
+     Output("rolling-chart", "figure"),
+     Output("trade-log", "children"),
+     Output("trades-store", "data")],
     [Input("run-btn", "n_clicks")],
-    [State("start-date", "date"),
-     State("end-date", "date")],
+    [State("start-date-input", "value"),
+     State("end-date-input", "value")],
     prevent_initial_call=False,
 )
 def run_backtest_callback(n_clicks, start_date, end_date):
-    """Run backtest and update all charts."""
-    status_messages = []
-    
-    def status_cb(msg):
-        status_messages.append(msg)
-    
+    """Run backtest and update all charts + KPIs."""
     try:
-        results = run_backtest(start=start_date, end=end_date, status_callback=status_cb)
+        results = run_backtest(start=start_date, end=end_date)
     except Exception as e:
-        empty_fig = go.Figure()
-        return (f"Error: {e}", empty_fig, empty_fig, empty_fig, "", "")
+        empty_fig = go.Figure().update_layout(template="plotly_dark")
+        empty_kpis = [dbc.Col(kpi_card("Error", str(e)[:20], color="danger"), width=12)]
+        return (f"Error: {e}", empty_kpis, empty_fig, empty_fig, empty_fig, empty_fig, "", None)
     
     portfolio_df = results["portfolio_df"]
     benchmark_df = results["benchmark_df"]
     signals_df = results["signals_df"]
     trades_df = results["trades_df"]
-    strategy_metrics = results["strategy_metrics"]
-    benchmark_metrics = results["benchmark_metrics"]
+    sm = results["strategy_metrics"]
+    bm = results["benchmark_metrics"]
+    
+    # --- KPI Cards ---
+    total_ret = sm.get("total_return", 0)
+    sharpe = sm.get("sharpe_ratio", 0)
+    max_dd = sm.get("max_drawdown", 0)
+    bh_ret = bm.get("total_return", 0)
+    alpha = total_ret - bh_ret
+    num_trades = sm.get("num_trades", 0)
+    
+    # Win rate from trades
+    if len(trades_df) > 0 and "gain_loss" in trades_df.columns:
+        wins = (trades_df["gain_loss"] > 0).sum()
+        win_rate = wins / len(trades_df) * 100
+    else:
+        win_rate = 0
+    
+    ret_color = "success" if total_ret > 0 else "danger"
+    sharpe_color = "success" if sharpe > 1 else ("warning" if sharpe > 0.5 else "danger")
+    dd_color = "success" if max_dd > -0.3 else ("warning" if max_dd > -0.5 else "danger")
+    alpha_color = "success" if alpha > 0 else "danger"
+    
+    kpis = [
+        dbc.Col(kpi_card("Total Return", f"{total_ret*100:+.1f}%",
+                        f"${sm.get('final_value', 0):,.0f}", ret_color), width=2),
+        dbc.Col(kpi_card("Sharpe Ratio", f"{sharpe:.2f}",
+                        f"B&H: {bm.get('sharpe_ratio', 0):.2f}", sharpe_color), width=2),
+        dbc.Col(kpi_card("Max Drawdown", f"{max_dd*100:.1f}%",
+                        f"B&H: {bm.get('max_drawdown', 0)*100:.1f}%", dd_color), width=2),
+        dbc.Col(kpi_card("vs Buy & Hold", f"{alpha*100:+.1f}%",
+                        "outperform" if alpha > 0 else "underperform", alpha_color), width=2),
+        dbc.Col(kpi_card("Trades", str(num_trades),
+                        f"Bull: {sm.get('bull_rebal', 0)} Def: {sm.get('defensive_rebal', 0)}"), width=2),
+        dbc.Col(kpi_card("Win Rate", f"{win_rate:.0f}%",
+                        f"{int(win_rate*num_trades/100)}/{num_trades} profitable"), width=2),
+    ]
     
     # --- Equity Curve ---
     equity_fig = go.Figure()
     equity_fig.add_trace(go.Scatter(
         x=portfolio_df.index, y=portfolio_df["portfolio_value"],
-        name="Strategy", line=dict(color="#00d4aa", width=2)
+        name="Strategy", line=dict(color="#00d4aa", width=2),
+        hovertemplate="Strategy: $%{y:,.0f}<extra></extra>"
     ))
     if len(benchmark_df) > 0:
         equity_fig.add_trace(go.Scatter(
             x=benchmark_df.index, y=benchmark_df["portfolio_value"],
-            name="Buy & Hold TQQQ", line=dict(color="#ff6b6b", width=2, dash="dash")
+            name="Buy & Hold", line=dict(color="#ff6b6b", width=1.5, dash="dash"),
+            hovertemplate="B&H: $%{y:,.0f}<extra></extra>"
         ))
     
-    # Shade regime regions on equity chart
-    regime_colors = {"bull": "rgba(0,200,0,0.07)", "neutral": "rgba(255,255,0,0.07)",
-                     "bear": "rgba(255,0,0,0.07)", "crisis": "rgba(255,0,0,0.15)"}
+    # Regime shading
+    regime_colors = {"bull": "rgba(0,200,0,0.06)", "neutral": "rgba(255,255,0,0.06)",
+                     "bear": "rgba(255,60,60,0.08)", "crisis": "rgba(255,0,0,0.12)"}
     if "regime" in portfolio_df.columns:
-        regime_series = portfolio_df["regime"]
-        prev_regime = None
-        block_start = None
-        for i, (date, regime_val) in enumerate(regime_series.items()):
-            if regime_val != prev_regime:
-                if prev_regime is not None and block_start is not None:
-                    equity_fig.add_vrect(
-                        x0=block_start, x1=date,
-                        fillcolor=regime_colors.get(prev_regime, "rgba(0,0,0,0)"),
-                        layer="below", line_width=0
-                    )
-                block_start = date
-                prev_regime = regime_val
-        if prev_regime and block_start:
-            equity_fig.add_vrect(
-                x0=block_start, x1=portfolio_df.index[-1],
-                fillcolor=regime_colors.get(prev_regime, "rgba(0,0,0,0)"),
-                layer="below", line_width=0
-            )
+        _add_regime_shading(equity_fig, portfolio_df["regime"], regime_colors)
     
-    equity_fig.update_layout(
-        title="Portfolio Equity Curve (shaded by regime: green=bull, yellow=neutral, red=bear/crisis)",
-        xaxis_title="Date", yaxis_title="Portfolio Value ($)",
-        template="plotly_dark", height=400,
-    )
-    
-    # --- Signals Chart ---
-    signals_fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                                row_heights=[0.5, 0.25, 0.25], vertical_spacing=0.03,
-                                subplot_titles=["TQQQ Price & Regime", "RSI", "Allocation"])
-    signals_fig.add_trace(go.Scatter(
-        x=signals_df.index, y=signals_df["tqqq_close"],
-        name="TQQQ Price", line=dict(color="#4ecdc4")
-    ), row=1, col=1)
-    signals_fig.add_trace(go.Scatter(
-        x=signals_df.index, y=signals_df["ema_short"],
-        name=f"EMA({config.EMA_SHORT})", line=dict(color="#ffe66d", dash="dot")
-    ), row=1, col=1)
-    
-    # Rebalance markers
-    bullish_rebal = signals_df[signals_df["signal"] == "rebalance_bullish"]
-    bearish_rebal = signals_df[signals_df["signal"] == "rebalance_bearish"]
-    defensive_rebal = signals_df[signals_df["signal"] == "rebalance_defensive"]
-    signals_fig.add_trace(go.Scatter(
-        x=bullish_rebal.index, y=bullish_rebal["tqqq_close"],
-        mode="markers", name="Bullish Rebalance",
-        marker=dict(symbol="triangle-up", size=10, color="lime")
-    ), row=1, col=1)
-    signals_fig.add_trace(go.Scatter(
-        x=bearish_rebal.index, y=bearish_rebal["tqqq_close"],
-        mode="markers", name="Bearish Rebalance",
-        marker=dict(symbol="triangle-down", size=10, color="red")
-    ), row=1, col=1)
-    signals_fig.add_trace(go.Scatter(
-        x=defensive_rebal.index, y=defensive_rebal["tqqq_close"],
-        mode="markers", name="Defensive Rebalance",
-        marker=dict(symbol="diamond", size=8, color="orange")
-    ), row=1, col=1)
-    
-    # Trailing stop markers (from trade log)
-    if len(trades_df) > 0:
-        trailing_stop_trades = trades_df[trades_df["signal"].str.contains("trailing_stop", na=False)]
-        if len(trailing_stop_trades) > 0:
-            ts_dates = pd.to_datetime(trailing_stop_trades["date"])
-            ts_prices = signals_df["tqqq_close"].reindex(ts_dates, method="nearest")
-            signals_fig.add_trace(go.Scatter(
-                x=ts_dates, y=ts_prices,
-                mode="markers", name="Trailing Stop",
-                marker=dict(symbol="x", size=12, color="magenta", line=dict(width=2))
-            ), row=1, col=1)
-    
-    # RSI subplot
-    signals_fig.add_trace(go.Scatter(
-        x=signals_df.index, y=signals_df["rsi"],
-        name="RSI", line=dict(color="#a8dadc")
-    ), row=2, col=1)
-    signals_fig.add_hline(y=config.RSI_OVERSOLD, line_dash="dash", line_color="lime",
-                          annotation_text="Oversold", row=2, col=1)
-    signals_fig.add_hline(y=config.RSI_OVERBOUGHT, line_dash="dash", line_color="red",
-                          annotation_text="Overbought", row=2, col=1)
-    
-    # Allocation subplot (stacked area)
-    signals_fig.add_trace(go.Scatter(
-        x=signals_df.index, y=signals_df["tqqq_alloc"] * 100,
-        name="TQQQ %", fill="tozeroy", line=dict(color="#00d4aa"),
-        fillcolor="rgba(0,212,170,0.3)"
-    ), row=3, col=1)
-    signals_fig.add_trace(go.Scatter(
-        x=signals_df.index, y=(signals_df["tqqq_alloc"] + signals_df["sqqq_alloc"]) * 100,
-        name="SQQQ %", fill="tonexty", line=dict(color="#ff6b6b"),
-        fillcolor="rgba(255,107,107,0.3)"
-    ), row=3, col=1)
-    
-    signals_fig.update_layout(
-        title="TQQQ Price, RSI & Allocation Breakdown",
-        template="plotly_dark", height=700,
-    )
-    
-    # --- Drawdown Chart ---
+    # Annotate max drawdown point
     values = portfolio_df["portfolio_value"]
     cummax = values.cummax()
-    drawdown = (values - cummax) / cummax * 100
+    drawdown_series = (values - cummax) / cummax
+    max_dd_idx = drawdown_series.idxmin()
+    if max_dd_idx is not None:
+        equity_fig.add_annotation(
+            x=max_dd_idx, y=values[max_dd_idx],
+            text=f"Max DD: {drawdown_series[max_dd_idx]*100:.1f}%",
+            showarrow=True, arrowhead=2, arrowcolor="#ff6b6b",
+            font=dict(size=10, color="#ff6b6b"),
+            ax=0, ay=-30
+        )
     
+    equity_fig.update_layout(
+        title=None,
+        margin=dict(l=50, r=20, t=30, b=30),
+        xaxis_title=None, yaxis_title="Portfolio Value ($)",
+        template="plotly_dark", height=320,
+        legend=dict(orientation="h", yanchor="top", y=1.02, xanchor="right", x=1),
+        hovermode="x unified",
+    )
+    
+    # --- Drawdown Chart (compact, vertical) ---
+    drawdown_pct = drawdown_series * 100
     drawdown_fig = go.Figure()
     drawdown_fig.add_trace(go.Scatter(
-        x=portfolio_df.index, y=drawdown,
-        fill="tozeroy", name="Strategy Drawdown",
-        line=dict(color="#ff6b6b")
+        x=portfolio_df.index, y=drawdown_pct,
+        fill="tozeroy", name="Strategy",
+        line=dict(color="#ff6b6b", width=1),
+        fillcolor="rgba(255,107,107,0.2)",
+        hovertemplate="%{y:.1f}%<extra></extra>"
     ))
     if len(benchmark_df) > 0:
         bench_values = benchmark_df["portfolio_value"]
-        bench_cummax = bench_values.cummax()
-        bench_dd = (bench_values - bench_cummax) / bench_cummax * 100
+        bench_dd = (bench_values - bench_values.cummax()) / bench_values.cummax() * 100
         drawdown_fig.add_trace(go.Scatter(
             x=benchmark_df.index, y=bench_dd,
-            name="Benchmark Drawdown", line=dict(color="#ffa500", dash="dash")
+            name="B&H", line=dict(color="#ffa500", width=1, dash="dot"),
+            hovertemplate="%{y:.1f}%<extra></extra>"
         ))
     drawdown_fig.update_layout(
-        title="Drawdown (%)",
-        xaxis_title="Date", yaxis_title="Drawdown %",
-        template="plotly_dark", height=300,
+        title=dict(text="Drawdown", font=dict(size=12)),
+        margin=dict(l=40, r=10, t=30, b=30),
+        xaxis_title=None, yaxis_title="%",
+        template="plotly_dark", height=320,
+        legend=dict(orientation="h", yanchor="top", y=1.02, x=0),
+        hovermode="x unified",
     )
     
-    # --- Metrics Table ---
-    def fmt_pct(v):
-        return f"{v*100:.2f}%" if v is not None else "N/A"
+    # --- Signals Chart ---
+    signals_fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True,
+        row_heights=[0.5, 0.2, 0.3], vertical_spacing=0.02,
+        subplot_titles=["TQQQ Price", "RSI", "Allocation %"]
+    )
+    signals_fig.add_trace(go.Scatter(
+        x=signals_df.index, y=signals_df["tqqq_close"],
+        name="TQQQ", line=dict(color="#4ecdc4", width=1.5),
+        hovertemplate="$%{y:.2f}<extra></extra>"
+    ), row=1, col=1)
     
-    def fmt_val(v):
-        return f"${v:,.2f}" if v is not None else "N/A"
-    
-    metrics_table = dbc.Table([
-        html.Thead(html.Tr([
-            html.Th("Metric"), html.Th("Strategy"), html.Th("Buy & Hold TQQQ")
-        ])),
-        html.Tbody([
-            html.Tr([html.Td("Total Return"), html.Td(fmt_pct(strategy_metrics.get("total_return"))), html.Td(fmt_pct(benchmark_metrics.get("total_return")))]),
-            html.Tr([html.Td("Annualized Return"), html.Td(fmt_pct(strategy_metrics.get("annualized_return"))), html.Td(fmt_pct(benchmark_metrics.get("annualized_return")))]),
-            html.Tr([html.Td("Max Drawdown"), html.Td(fmt_pct(strategy_metrics.get("max_drawdown"))), html.Td(fmt_pct(benchmark_metrics.get("max_drawdown")))]),
-            html.Tr([html.Td("Sharpe Ratio"), html.Td(f"{strategy_metrics.get('sharpe_ratio', 0):.2f}"), html.Td(f"{benchmark_metrics.get('sharpe_ratio', 0):.2f}")]),
-            html.Tr([html.Td("Final Value"), html.Td(fmt_val(strategy_metrics.get("final_value"))), html.Td(fmt_val(benchmark_metrics.get("final_value")))]),
-            html.Tr([html.Td("Rebalances"), html.Td(str(strategy_metrics.get("num_trades", 0))), html.Td("0")]),
-            html.Tr([html.Td("Bullish Rebal"), html.Td(str(strategy_metrics.get("bull_rebal", 0))), html.Td("N/A")]),
-            html.Tr([html.Td("Bearish Rebal"), html.Td(str(strategy_metrics.get("bear_rebal", 0))), html.Td("N/A")]),
-            html.Tr([html.Td("Defensive Rebal"), html.Td(str(strategy_metrics.get("defensive_rebal", 0))), html.Td("N/A")]),
-        ])
-    ], bordered=True, color="dark", striped=True, hover=True, size="sm")
-    
-    # --- Trade Log (show buy/sell for both TQQQ and SQQQ) ---
+    # Trade markers
     if len(trades_df) > 0:
-        display_df = trades_df[["date", "signal", "regime",
-                                "tqqq_action", "tqqq_alloc_from", "tqqq_alloc_to", "tqqq_price",
-                                "sqqq_action", "sqqq_alloc_from", "sqqq_alloc_to", "sqqq_price",
-                                "cash_after", "portfolio_value", "gain_loss"]].copy()
-        display_df.columns = ["Date", "Signal", "Regime",
-                              "TQQQ Action", "TQQQ% From", "TQQQ% To", "TQQQ Exec Price",
-                              "SQQQ Action", "SQQQ% From", "SQQQ% To", "SQQQ Exec Price",
-                              "Cash $", "Portfolio $", "Gain/Loss $"]
-        display_df = display_df.round(2)
-        trade_table = dbc.Table.from_dataframe(
-            display_df.head(100), striped=True, bordered=True, hover=True, color="dark", size="sm"
-        )
-    else:
-        trade_table = html.P("No trades executed in this period.")
+        buys = trades_df[trades_df["tqqq_action"] == "buy"]
+        sells = trades_df[trades_df["tqqq_action"] == "sell"]
+        if len(buys) > 0:
+            buy_dates = pd.to_datetime(buys["date"])
+            buy_prices = signals_df["tqqq_close"].reindex(buy_dates, method="nearest")
+            signals_fig.add_trace(go.Scatter(
+                x=buy_dates, y=buy_prices,
+                mode="markers", name="Buy",
+                marker=dict(symbol="triangle-up", size=8, color="lime"),
+                hovertemplate="BUY @ $%{y:.2f}<extra></extra>"
+            ), row=1, col=1)
+        if len(sells) > 0:
+            sell_dates = pd.to_datetime(sells["date"])
+            sell_prices = signals_df["tqqq_close"].reindex(sell_dates, method="nearest")
+            signals_fig.add_trace(go.Scatter(
+                x=sell_dates, y=sell_prices,
+                mode="markers", name="Sell",
+                marker=dict(symbol="triangle-down", size=8, color="#ff6b6b"),
+                hovertemplate="SELL @ $%{y:.2f}<extra></extra>"
+            ), row=1, col=1)
     
-    status = f"Backtest complete: {start_date} to {end_date} | {len(trades_df)} trades"
-    return status, equity_fig, signals_fig, drawdown_fig, metrics_table, trade_table
+    # RSI
+    signals_fig.add_trace(go.Scatter(
+        x=signals_df.index, y=signals_df["rsi"],
+        name="RSI", line=dict(color="#a8dadc", width=1),
+        hovertemplate="RSI: %{y:.0f}<extra></extra>"
+    ), row=2, col=1)
+    signals_fig.add_hline(y=config.RSI_OVERSOLD, line_dash="dash", line_color="lime",
+                          line_width=0.5, row=2, col=1)
+    signals_fig.add_hline(y=config.RSI_OVERBOUGHT, line_dash="dash", line_color="red",
+                          line_width=0.5, row=2, col=1)
+    signals_fig.add_hrect(y0=0, y1=config.RSI_OVERSOLD, fillcolor="rgba(0,255,0,0.03)",
+                          line_width=0, row=2, col=1)
+    signals_fig.add_hrect(y0=config.RSI_OVERBOUGHT, y1=100, fillcolor="rgba(255,0,0,0.03)",
+                          line_width=0, row=2, col=1)
+    
+    # Allocation
+    signals_fig.add_trace(go.Scatter(
+        x=signals_df.index, y=signals_df["tqqq_alloc"] * 100,
+        name="TQQQ%", fill="tozeroy",
+        line=dict(color="#00d4aa", width=1), fillcolor="rgba(0,212,170,0.3)",
+        hovertemplate="TQQQ: %{y:.0f}%<extra></extra>"
+    ), row=3, col=1)
+    if "sqqq_alloc" in signals_df.columns:
+        sqqq_total = (signals_df["tqqq_alloc"] + signals_df["sqqq_alloc"]) * 100
+        signals_fig.add_trace(go.Scatter(
+            x=signals_df.index, y=sqqq_total,
+            name="SQQQ%", fill="tonexty",
+            line=dict(color="#ff6b6b", width=1), fillcolor="rgba(255,107,107,0.3)",
+            hovertemplate="Total: %{y:.0f}%<extra></extra>"
+        ), row=3, col=1)
+    
+    signals_fig.update_layout(
+        title=None,
+        margin=dict(l=50, r=20, t=30, b=30),
+        template="plotly_dark", height=420,
+        showlegend=False,
+        hovermode="x unified",
+    )
+    signals_fig.update_yaxes(title_text="$", row=1, col=1)
+    signals_fig.update_yaxes(title_text="RSI", row=2, col=1, range=[0, 100])
+    signals_fig.update_yaxes(title_text="%", row=3, col=1, range=[0, 105])
+    
+    # --- Rolling Metrics Chart ---
+    rolling_fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.5, 0.5], vertical_spacing=0.05,
+        subplot_titles=["Rolling 60d Sharpe", "Rolling 20d Volatility"]
+    )
+    daily_ret = values.pct_change()
+    rolling_sharpe = (
+        (daily_ret.rolling(60).mean() - config.RISK_FREE_RATE / 252)
+        / daily_ret.rolling(60).std()
+    ) * np.sqrt(252)
+    rolling_vol = daily_ret.rolling(20).std() * np.sqrt(252) * 100
+    
+    rolling_fig.add_trace(go.Scatter(
+        x=portfolio_df.index, y=rolling_sharpe,
+        name="Sharpe", line=dict(color="#ffe66d", width=1.5),
+        hovertemplate="Sharpe: %{y:.2f}<extra></extra>"
+    ), row=1, col=1)
+    rolling_fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=0.5, row=1, col=1)
+    rolling_fig.add_hline(y=1, line_dash="dot", line_color="lime", line_width=0.5, row=1, col=1)
+    
+    rolling_fig.add_trace(go.Scatter(
+        x=portfolio_df.index, y=rolling_vol,
+        name="Vol %", line=dict(color="#ff9f43", width=1.5),
+        fill="tozeroy", fillcolor="rgba(255,159,67,0.1)",
+        hovertemplate="Ann. Vol: %{y:.1f}%<extra></extra>"
+    ), row=2, col=1)
+    
+    rolling_fig.update_layout(
+        title=None,
+        margin=dict(l=40, r=10, t=30, b=30),
+        template="plotly_dark", height=420,
+        showlegend=False,
+        hovermode="x unified",
+    )
+    
+    # --- Trade Log ---
+    trade_table = _build_trade_table(trades_df, "all")
+    
+    # Serialize trades for filtering callback
+    trades_data = trades_df.to_dict("records") if len(trades_df) > 0 else []
+    
+    status = f"✓ {start_date} → {end_date} | {len(trades_df)} trades | {(datetime.now()).strftime('%H:%M:%S')}"
+    return status, kpis, equity_fig, signals_fig, drawdown_fig, rolling_fig, trade_table, trades_data
+
+
+@app.callback(
+    Output("trade-log", "children", allow_duplicate=True),
+    Input("trade-filter", "value"),
+    State("trades-store", "data"),
+    prevent_initial_call=True,
+)
+def filter_trades(filter_val, trades_data):
+    """Filter trade log without re-running backtest."""
+    if not trades_data:
+        return html.P("No trades.", className="text-muted")
+    trades_df = pd.DataFrame(trades_data)
+    return _build_trade_table(trades_df, filter_val)
 
 
 @app.callback(
@@ -335,46 +440,114 @@ def run_backtest_callback(n_clicks, start_date, end_date):
 def run_forward_callback(n_clicks):
     """Run forward test and display results."""
     messages = []
-    
     def status_cb(msg):
         messages.append(msg)
     
     state = run_forward_test(status_callback=status_cb)
     
     if not state["portfolio_history"]:
-        return html.P("No forward test data yet. Run the forward test to start paper trading.")
+        return html.P("No data yet. Run forward test to start.", className="text-muted small")
     
-    # Show recent history
-    history = state["portfolio_history"][-30:]  # Last 30 days
+    history = state["portfolio_history"][-30:]
+    latest = history[-1]
     
     content = [
-        html.P(f"Current Regime: {history[-1].get('regime', 'N/A').upper()}", className="text-warning"),
-        html.P(f"Current Value: ${history[-1]['portfolio_value']}"),
-        html.P(f"TQQQ: {history[-1].get('tqqq_alloc', 'N/A')} | SQQQ: {history[-1].get('sqqq_alloc', 'N/A')}"),
-        html.P(f"Total Rebalances: {len(state['trades'])}"),
-        html.Hr(),
-        html.H6("Recent Activity"),
+        dbc.Row([
+            dbc.Col([
+                html.Span("Regime: ", className="text-muted small"),
+                dbc.Badge(latest.get("regime", "N/A").upper(),
+                         color="success" if latest.get("regime") == "bull" else "danger"),
+            ], width=6),
+            dbc.Col([
+                html.Span(f"${latest['portfolio_value']:,.0f}",
+                         className="text-light fw-bold"),
+            ], width=6, className="text-end"),
+        ], className="mb-2"),
+        html.Small(f"Trades: {len(state['trades'])} | "
+                  f"TQQQ: {latest.get('tqqq_alloc', 'N/A')} | "
+                  f"SQQQ: {latest.get('sqqq_alloc', 'N/A')}",
+                  className="text-muted"),
     ]
     
-    # Recent trades
     if state["trades"]:
-        recent_trades = state["trades"][-10:]
-        trade_rows = [html.Tr([
-            html.Td(t["date"]), html.Td(t["action"]), html.Td(t.get("regime", "")),
-            html.Td(t.get("tqqq_alloc", "")), html.Td(t.get("sqqq_alloc", "")),
-            html.Td(f"${t.get('portfolio_value', 0)}")
-        ]) for t in recent_trades]
+        recent = state["trades"][-5:]
+        rows = [html.Tr([
+            html.Td(t["date"], className="small"),
+            html.Td(t["action"], className="small"),
+            html.Td(f"${t.get('portfolio_value', 0):,.0f}", className="small"),
+        ]) for t in recent]
         content.append(dbc.Table([
-            html.Thead(html.Tr([html.Th("Date"), html.Th("Action"), html.Th("Regime"),
-                               html.Th("TQQQ%"), html.Th("SQQQ%"), html.Th("Value")])),
-            html.Tbody(trade_rows)
-        ], bordered=True, color="dark", size="sm"))
-    
-    # Status messages
-    if messages:
-        content.append(html.P(" | ".join(messages[-3:]), className="text-muted small"))
+            html.Thead(html.Tr([html.Th("Date"), html.Th("Action"), html.Th("Value")])),
+            html.Tbody(rows)
+        ], bordered=True, color="dark", size="sm", className="mt-2"))
     
     return content
+
+
+# --- Helper Functions ---
+
+def _add_regime_shading(fig, regime_series, colors):
+    """Add regime-colored vertical bands to a figure."""
+    prev_regime = None
+    block_start = None
+    for date, regime_val in regime_series.items():
+        if regime_val != prev_regime:
+            if prev_regime is not None and block_start is not None:
+                fig.add_vrect(
+                    x0=block_start, x1=date,
+                    fillcolor=colors.get(prev_regime, "rgba(0,0,0,0)"),
+                    layer="below", line_width=0
+                )
+            block_start = date
+            prev_regime = regime_val
+    if prev_regime and block_start:
+        fig.add_vrect(
+            x0=block_start, x1=regime_series.index[-1],
+            fillcolor=colors.get(prev_regime, "rgba(0,0,0,0)"),
+            layer="below", line_width=0
+        )
+
+
+def _build_trade_table(trades_df, filter_val):
+    """Build the filtered trade table."""
+    if len(trades_df) == 0:
+        return html.P("No trades executed.", className="text-muted")
+    
+    df = trades_df.copy()
+    if filter_val == "bullish":
+        df = df[df["signal"].str.contains("bullish", na=False)]
+    elif filter_val == "defensive":
+        df = df[df["signal"].str.contains("defensive", na=False)]
+    elif filter_val == "stops":
+        df = df[df["signal"].str.contains("trailing_stop", na=False)]
+    
+    if len(df) == 0:
+        return html.P(f"No {filter_val} trades found.", className="text-muted")
+    
+    # Compact display columns
+    display_cols = ["date", "signal", "regime", "tqqq_alloc_from", "tqqq_alloc_to",
+                   "portfolio_value", "gain_loss"]
+    available_cols = [c for c in display_cols if c in df.columns]
+    display_df = df[available_cols].copy()
+    display_df.columns = ["Date", "Signal", "Regime", "From%", "To%", "Value", "G/L"][:len(available_cols)]
+    
+    # Color gain/loss
+    rows = []
+    for _, row in display_df.tail(50).iterrows():
+        cells = []
+        for i, val in enumerate(row):
+            if display_df.columns[i] == "G/L" and isinstance(val, (int, float)):
+                color = "#00d4aa" if val > 0 else "#ff6b6b" if val < 0 else ""
+                cells.append(html.Td(f"${val:+,.0f}", style={"color": color}, className="small"))
+            elif display_df.columns[i] == "Value" and isinstance(val, (int, float)):
+                cells.append(html.Td(f"${val:,.0f}", className="small"))
+            else:
+                cells.append(html.Td(str(val)[:16], className="small"))
+        rows.append(html.Tr(cells))
+    
+    header = html.Thead(html.Tr([html.Th(c, className="small") for c in display_df.columns]))
+    return dbc.Table([header, html.Tbody(rows)],
+                    bordered=True, hover=True, color="dark", size="sm", striped=True)
 
 
 def run_dashboard():

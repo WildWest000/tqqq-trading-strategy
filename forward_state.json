@@ -1,0 +1,28 @@
+{
+  "start_date": "2026-05-30",
+  "starting_capital": 10000,
+  "trades": [
+    {
+      "date": "2026-05-29",
+      "action": "rebalance",
+      "tqqq_alloc": "75%",
+      "sqqq_alloc": "15%",
+      "regime": "bull",
+      "portfolio_value": 10000.0
+    }
+  ],
+  "portfolio_history": [
+    {
+      "date": "2026-05-29",
+      "portfolio_value": 10000.0,
+      "regime": "bull",
+      "action": "rebalance",
+      "rsi": 76.8,
+      "tqqq_alloc": "75%",
+      "sqqq_alloc": "15%"
+    }
+  ],
+  "tqqq_shares": 88,
+  "sqqq_shares": 39,
+  "cash": 1073.6001434326172
+}

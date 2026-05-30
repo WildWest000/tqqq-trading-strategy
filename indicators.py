@@ -5,9 +5,14 @@ Approach:
 - Regime layer (QQQ trend + volatility) sets base TQQQ/SQQQ allocation
 - Tactical layer (RSI + price/EMA distance) adjusts allocation within regime bounds
 - SQQQ used only in bearish regimes; otherwise TQQQ + cash
+
+Supports two regime detection methods (config.REGIME_METHOD):
+- "rules": Original rule-based (EMA crossovers + momentum + ATR)
+- "hmm": Hidden Markov Model with expanding-window training
 """
 import pandas as pd
 import numpy as np
+import warnings
 import config
 
 
@@ -41,9 +46,153 @@ def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int =
     return tr.rolling(period).mean()
 
 
-def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame) -> pd.DataFrame:
+def classify_regimes_hmm(qqq_close: pd.Series, qqq_high: pd.Series = None, qqq_low: pd.Series = None) -> pd.DataFrame:
+    """
+    Classify market regimes using a Hidden Markov Model with expanding-window training.
+    
+    Features: daily returns, 14-day rolling volatility, 10-day momentum.
+    Retrains every HMM_RETRAIN_FREQUENCY days using only past data (no look-ahead).
+    
+    Returns DataFrame with 'regime' column and probability columns for each regime.
+    """
+    from hmmlearn.hmm import GaussianHMM
+    from sklearn.preprocessing import StandardScaler
+    
+    # Compute features from QQQ
+    returns = qqq_close.pct_change()
+    volatility = returns.rolling(14).std()
+    momentum = qqq_close.pct_change(10)
+    
+    features_df = pd.DataFrame({
+        "returns": returns,
+        "volatility": volatility,
+        "momentum": momentum,
+    }, index=qqq_close.index).dropna()
+    
+    n = len(features_df)
+    min_train = config.HMM_MIN_TRAIN_DAYS
+    retrain_freq = config.HMM_RETRAIN_FREQUENCY
+    n_states = config.HMM_N_STATES
+    
+    # Output arrays
+    regimes = pd.Series("neutral", index=features_df.index)
+    regime_probs = pd.DataFrame(0.0, index=features_df.index, 
+                                columns=["p_bull", "p_neutral", "p_bear", "p_crisis"])
+    
+    if n < min_train:
+        # Not enough data — return neutral for everything
+        return pd.DataFrame({"regime": regimes, **regime_probs}, index=features_df.index)
+    
+    # Walk forward with periodic retraining
+    model = None
+    scaler = None
+    state_mapping = None
+    last_train_idx = 0
+    
+    for i in range(min_train, n):
+        # Retrain periodically
+        if model is None or (i - last_train_idx) >= retrain_freq:
+            train_data = features_df.iloc[:i].values
+            
+            # Scale features using only training data
+            scaler = StandardScaler()
+            train_scaled = scaler.fit_transform(train_data)
+            
+            # Fit HMM
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = GaussianHMM(
+                    n_components=n_states,
+                    covariance_type=config.HMM_COVARIANCE_TYPE,
+                    n_iter=config.HMM_N_ITER,
+                    random_state=config.HMM_RANDOM_STATE,
+                )
+                model.fit(train_scaled)
+            
+            # Map states to regimes using training data statistics
+            train_states = model.predict(train_scaled)
+            state_mapping = _map_states_to_regimes(
+                train_states, features_df.iloc[:i], n_states
+            )
+            last_train_idx = i
+        
+        # Predict current day's regime
+        current_features = features_df.iloc[i:i+1].values
+        current_scaled = scaler.transform(current_features)
+        
+        state = model.predict(current_scaled)[0]
+        probs = model.predict_proba(current_scaled)[0]
+        
+        date = features_df.index[i]
+        regimes.iloc[i] = state_mapping[state]
+        
+        # Map probabilities to regime names
+        for s, regime_name in state_mapping.items():
+            prob_col = f"p_{regime_name}"
+            if prob_col in regime_probs.columns:
+                regime_probs.loc[date, prob_col] += probs[s]
+    
+    return pd.DataFrame({"regime": regimes, **regime_probs}, index=features_df.index)
+
+
+def _map_states_to_regimes(states: np.ndarray, features_df: pd.DataFrame, n_states: int) -> dict:
+    """
+    Map HMM states to regime labels using mean return AND volatility.
+    
+    For 3 states: bull (high return), bear (low return + high vol), neutral (middle)
+    For 4 states: adds crisis (lowest return + highest vol)
+    """
+    state_stats = {}
+    for s in range(n_states):
+        mask = states == s
+        if mask.sum() == 0:
+            state_stats[s] = {"mean_ret": 0, "mean_vol": 0}
+            continue
+        rows = features_df.iloc[np.where(mask)[0]]
+        state_stats[s] = {
+            "mean_ret": rows["returns"].mean(),
+            "mean_vol": rows["volatility"].mean(),
+        }
+    
+    # Sort states by mean return (descending)
+    sorted_by_return = sorted(state_stats.keys(), key=lambda s: state_stats[s]["mean_ret"], reverse=True)
+    
+    if n_states == 3:
+        # Simple: best return = bull, worst = bear, middle = neutral
+        mapping = {
+            sorted_by_return[0]: "bull",
+            sorted_by_return[1]: "neutral",
+            sorted_by_return[2]: "bear",
+        }
+    elif n_states == 4:
+        # Among the two worst-return states, highest vol = crisis
+        bottom_two = sorted_by_return[2:]
+        crisis_state = max(bottom_two, key=lambda s: state_stats[s]["mean_vol"])
+        bear_state = [s for s in bottom_two if s != crisis_state][0]
+        mapping = {
+            sorted_by_return[0]: "bull",
+            sorted_by_return[1]: "neutral",
+            bear_state: "bear",
+            crisis_state: "crisis",
+        }
+    else:
+        # Fallback: best = bull, worst = bear, rest = neutral
+        mapping = {}
+        mapping[sorted_by_return[0]] = "bull"
+        mapping[sorted_by_return[-1]] = "bear"
+        for s in sorted_by_return[1:-1]:
+            mapping[s] = "neutral"
+    
+    return mapping
+
+
+def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, qqq_full: pd.DataFrame = None) -> pd.DataFrame:
     """
     Generate allocation signals using a regime-based dual-allocation approach.
+    
+    Args:
+        tqqq, sqqq, qqq: Price data for the backtest period
+        qqq_full: Full historical QQQ data for HMM training (optional, used when REGIME_METHOD="hmm")
     
     Returns a DataFrame with:
     - Prices, indicators
@@ -93,18 +242,77 @@ def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame) 
     df["high_vol"] = df["volatility"] > vol_median * 1.5
     
     # --- Regime Classification ---
-    # Bull: QQQ above 50-EMA OR (above 20-EMA with positive momentum)
-    # Bear: QQQ below both EMAs and negative momentum  
-    # Crisis: Bear + high volatility (aggressive hedging needed)
-    # Neutral: mixed signals
-    df["regime"] = "neutral"
-    bull_mask = df["qqq_uptrend"] | (df["qqq_above_short_ema"] & (df["qqq_momentum"] > 0))
-    bear_mask = ~df["qqq_uptrend"] & ~df["qqq_above_short_ema"] & (df["qqq_momentum"] < 0)
-    crisis_mask = bear_mask & df["high_vol"]
+    if config.REGIME_METHOD == "mom_vol":
+        # Momentum + Vol-Scaled: smooth allocation based on momentum gate and volatility scaling
+        mom = df["qqq_close"].pct_change(config.MOM_LOOKBACK)
+        vol = df["qqq_close"].pct_change().rolling(config.VOL_LOOKBACK).std()
+        vol_med = vol.expanding().median()
+        vol_ratio = vol / vol_med
+        
+        # Vol-scaled allocation: 100% at vol<=floor, linearly to 0% at vol>=ceiling
+        vol_alloc = ((config.VOL_CEILING - vol_ratio.clip(config.VOL_FLOOR, config.VOL_CEILING)) 
+                     / (config.VOL_CEILING - config.VOL_FLOOR)).clip(0.0, 1.0)
+        
+        # Momentum positive: full vol-scaled; negative: reduced (soft exit)
+        alloc = pd.Series(
+            np.where(mom > 0, vol_alloc, config.MOM_NEGATIVE_SCALE * vol_alloc),
+            index=df.index
+        )
+        
+        # RSI dip-buy: when momentum is negative but TQQQ is oversold, aggressively buy the dip
+        oversold_bear = (mom <= 0) & (df["rsi"] < config.RSI_DIP_BUY_THRESHOLD)
+        alloc[oversold_bear] = config.RSI_DIP_BUY_ALLOC
+        
+        df["tqqq_alloc"] = alloc
+        df["sqqq_alloc"] = 0.0
+        df["regime"] = np.where(mom > 0, "bull", "bear")
+        
+        # Shift signals forward 1 day (no look-ahead)
+        for col in ["tqqq_alloc", "sqqq_alloc", "regime"]:
+            df[col] = df[col].shift(1)
+        
+        df["cash_alloc"] = 1.0 - df["tqqq_alloc"] - df["sqqq_alloc"]
+        
+        # Signal labels
+        df["signal"] = "hold"
+        prev_tqqq = df["tqqq_alloc"].shift(1)
+        tqqq_change = (df["tqqq_alloc"] - prev_tqqq).abs()
+        needs_rebalance = tqqq_change > config.REBALANCE_THRESHOLD
+        df.loc[needs_rebalance & (df["tqqq_alloc"] > prev_tqqq), "signal"] = "rebalance_bullish"
+        df.loc[needs_rebalance & (df["tqqq_alloc"] < prev_tqqq), "signal"] = "rebalance_defensive"
+        
+        return df.dropna()
     
-    df.loc[bull_mask, "regime"] = "bull"
-    df.loc[bear_mask & ~crisis_mask, "regime"] = "bear"
-    df.loc[crisis_mask, "regime"] = "crisis"
+    elif config.REGIME_METHOD == "hmm":
+        # HMM-based regime detection (expanding window, no look-ahead)
+        # Use full historical QQQ data for training if available
+        hmm_qqq_close = qqq_full["Close"] if qqq_full is not None else df["qqq_close"]
+        hmm_result = classify_regimes_hmm(hmm_qqq_close)
+        
+        # Align HMM results with our backtest DataFrame (only keep backtest period)
+        hmm_aligned = hmm_result.reindex(df.index)
+        df["regime"] = hmm_aligned["regime"].fillna("neutral")
+        
+        # Use probability-weighted allocations if below threshold
+        if "p_bull" in hmm_result.columns:
+            for col in ["p_bull", "p_neutral", "p_bear", "p_crisis"]:
+                df[col] = 0.0
+                if col in hmm_aligned.columns:
+                    df[col] = hmm_aligned[col].fillna(0.0)
+    else:
+        # Original rule-based regime classification
+        # Bull: QQQ above 50-EMA OR (above 20-EMA with positive momentum)
+        # Bear: QQQ below both EMAs and negative momentum  
+        # Crisis: Bear + high volatility (aggressive hedging needed)
+        # Neutral: mixed signals
+        df["regime"] = "neutral"
+        bull_mask = df["qqq_uptrend"] | (df["qqq_above_short_ema"] & (df["qqq_momentum"] > 0))
+        bear_mask = ~df["qqq_uptrend"] & ~df["qqq_above_short_ema"] & (df["qqq_momentum"] < 0)
+        crisis_mask = bear_mask & df["high_vol"]
+        
+        df.loc[bull_mask, "regime"] = "bull"
+        df.loc[bear_mask & ~crisis_mask, "regime"] = "bear"
+        df.loc[crisis_mask, "regime"] = "crisis"
     
     # --- Drawdown Detection ---
     # Track if QQQ has dropped >8% from its 20-day high (rapid decline signal)
@@ -117,17 +325,51 @@ def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame) 
     # Neutral: 70% TQQQ, 0% SQQQ, 30% cash
     # Bear: 0% TQQQ, 0% SQQQ, 100% cash (SQQQ decays - cash is safer)
     # Crisis: 0% TQQQ, 20% SQQQ, 80% cash (small SQQQ only in sharp drops)
-    df["tqqq_alloc"] = 0.70  # neutral default
-    df["sqqq_alloc"] = 0.0
     
-    df.loc[df["regime"] == "bull", "tqqq_alloc"] = 1.0
-    df.loc[df["regime"] == "bull", "sqqq_alloc"] = 0.0
-    
-    df.loc[df["regime"] == "bear", "tqqq_alloc"] = 0.0
-    df.loc[df["regime"] == "bear", "sqqq_alloc"] = 0.0
-    
-    df.loc[df["regime"] == "crisis", "tqqq_alloc"] = 0.0
-    df.loc[df["regime"] == "crisis", "sqqq_alloc"] = 0.20
+    if config.REGIME_METHOD == "hmm" and "p_bull" in df.columns:
+        # Probability-weighted allocations for smoother transitions
+        p_bull = df.get("p_bull", 0.0)
+        p_neutral = df.get("p_neutral", 0.0)
+        p_bear = df.get("p_bear", 0.0)
+        p_crisis = df.get("p_crisis", 0.0)
+        
+        df["tqqq_alloc"] = (
+            p_bull * 1.0 +
+            p_neutral * 0.70 +
+            p_bear * 0.0 +
+            p_crisis * 0.0
+        )
+        df["sqqq_alloc"] = (
+            p_bull * 0.0 +
+            p_neutral * 0.0 +
+            p_bear * 0.0 +
+            p_crisis * 0.20
+        )
+        # If dominant regime probability exceeds threshold, use hard allocation
+        prob_cols = [c for c in ["p_bull", "p_neutral", "p_bear", "p_crisis"] if c in df.columns]
+        if prob_cols:
+            max_prob = df[prob_cols].max(axis=1)
+            hard_regime = max_prob >= config.HMM_PROB_THRESHOLD
+            df.loc[hard_regime & (df["regime"] == "bull"), "tqqq_alloc"] = 1.0
+            df.loc[hard_regime & (df["regime"] == "bull"), "sqqq_alloc"] = 0.0
+            df.loc[hard_regime & (df["regime"] == "bear"), "tqqq_alloc"] = 0.0
+            df.loc[hard_regime & (df["regime"] == "bear"), "sqqq_alloc"] = 0.0
+            df.loc[hard_regime & (df["regime"] == "crisis"), "tqqq_alloc"] = 0.0
+            df.loc[hard_regime & (df["regime"] == "crisis"), "sqqq_alloc"] = 0.20
+            df.loc[hard_regime & (df["regime"] == "neutral"), "tqqq_alloc"] = 0.70
+            df.loc[hard_regime & (df["regime"] == "neutral"), "sqqq_alloc"] = 0.0
+    else:
+        df["tqqq_alloc"] = 0.70  # neutral default
+        df["sqqq_alloc"] = 0.0
+        
+        df.loc[df["regime"] == "bull", "tqqq_alloc"] = 1.0
+        df.loc[df["regime"] == "bull", "sqqq_alloc"] = 0.0
+        
+        df.loc[df["regime"] == "bear", "tqqq_alloc"] = 0.0
+        df.loc[df["regime"] == "bear", "sqqq_alloc"] = 0.0
+        
+        df.loc[df["regime"] == "crisis", "tqqq_alloc"] = 0.0
+        df.loc[df["regime"] == "crisis", "sqqq_alloc"] = 0.20
     
     # Rapid decline override: go mostly cash with small SQQQ hedge
     df.loc[rapid_decline & (df["regime"] != "crisis"), "tqqq_alloc"] = 0.0

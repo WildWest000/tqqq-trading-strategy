@@ -115,10 +115,19 @@ def run_backtest(start: str = None, end: str = None, status_callback=None) -> di
     if len(tqqq) == 0:
         raise ValueError("No TQQQ data available for the specified date range")
     
+    # For HMM: load full historical QQQ data for training context
+    qqq_full = None
+    if config.REGIME_METHOD == "hmm":
+        from download_data import load_cached_data
+        qqq_full = load_cached_data("QQQ")
+        if qqq_full is not None and len(qqq_full) > 0:
+            # Use all cached data up to end date for training
+            qqq_full = qqq_full[qqq_full.index <= pd.Timestamp(end)]
+    
     # Generate signals
     if status_callback:
         status_callback("Generating signals...")
-    signals_df = generate_signals(tqqq, sqqq, qqq)
+    signals_df = generate_signals(tqqq, sqqq, qqq, qqq_full=qqq_full)
     
     # Run strategy
     if status_callback:

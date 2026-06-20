@@ -17,6 +17,77 @@ def get_cache_path(ticker: str) -> str:
     return os.path.join(config.DATA_DIR, f"{ticker}.csv")
 
 
+# Tracks the last calendar date on which a "refresh to latest" was performed,
+# so daily auto-updates hit the network at most once per day.
+LAST_UPDATE_FILE = os.path.join(config.DATA_DIR, ".last_update.json")
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def get_last_update() -> str | None:
+    """Return the date (YYYY-MM-DD) of the last successful refresh_latest, or None."""
+    if not os.path.exists(LAST_UPDATE_FILE):
+        return None
+    try:
+        import json
+        with open(LAST_UPDATE_FILE) as f:
+            return json.load(f).get("last_update")
+    except (ValueError, OSError):
+        return None
+
+
+def mark_updated(date: str = None):
+    """Record that data was refreshed on the given date (defaults to today)."""
+    import json
+    os.makedirs(config.DATA_DIR, exist_ok=True)
+    with open(LAST_UPDATE_FILE, "w") as f:
+        json.dump({"last_update": date or _today_str()}, f)
+
+
+def refresh_latest(status_callback=None, force=False) -> dict:
+    """
+    Extend the cached price data for all tickers up to today's latest bar.
+
+    Guarded to perform network downloads at most once per calendar day unless
+    ``force=True``. Safe to call on every backtest/dashboard load — it is a
+    no-op (no network) when data was already refreshed today.
+
+    Returns a summary dict: {updated, last_update, latest_date}.
+    """
+    today = _today_str()
+    if not force and get_last_update() == today:
+        latest = None
+        cached = load_cached_data(config.TICKERS[0])
+        if cached is not None and len(cached) > 0:
+            latest = cached.index.max().strftime("%Y-%m-%d")
+        if status_callback:
+            status_callback(f"Data already up to date for {today} (latest bar: {latest})")
+        return {"updated": False, "last_update": today, "latest_date": latest}
+
+    # yfinance end is exclusive — request tomorrow so today's completed bar is included.
+    end_excl = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    start = config.DEFAULT_BACKTEST_START
+
+    latest_date = None
+    for ticker in config.TICKERS:
+        try:
+            df = download_ticker(ticker, start, end_excl, status_callback)
+            if df is not None and len(df) > 0:
+                d = df.index.max().strftime("%Y-%m-%d")
+                if latest_date is None or d > latest_date:
+                    latest_date = d
+        except Exception as e:
+            if status_callback:
+                status_callback(f"{ticker}: refresh failed ({e})")
+
+    mark_updated(today)
+    if status_callback:
+        status_callback(f"Data refreshed for {today} (latest bar: {latest_date})")
+    return {"updated": True, "last_update": today, "latest_date": latest_date}
+
+
 def load_cached_data(ticker: str) -> pd.DataFrame | None:
     """Load cached data from CSV if it exists."""
     path = get_cache_path(ticker)

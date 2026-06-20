@@ -3,6 +3,7 @@ Configuration for TQQQ/SQQQ Mean Reversion Trading Strategy.
 All parameters are centralized here for easy tuning.
 """
 import os
+from datetime import datetime
 
 # --- Tickers ---
 TICKERS = ["TQQQ", "SQQQ", "QQQ"]
@@ -28,7 +29,8 @@ RISK_FREE_RATE = 0.045  # Annual risk-free rate (T-bill ~4.5%)
 
 # --- Default Backtest Period (user overrides in dashboard) ---
 DEFAULT_BACKTEST_START = "2020-01-01"
-DEFAULT_BACKTEST_END = "2026-05-01"
+# End defaults to today so backtests always include the latest available data.
+DEFAULT_BACKTEST_END = datetime.now().strftime("%Y-%m-%d")
 
 # --- Data Download Settings ---
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -58,4 +60,4 @@ RSI_DIP_BUY_ALLOC = 0.8  # Allocation during dip-buy override
 
 # --- Dashboard ---
 DASHBOARD_PORT = 8050
-DASHBOARD_HOST = "127.0.0.1"
+DASHBOARD_HOST = "0.0.0.0"

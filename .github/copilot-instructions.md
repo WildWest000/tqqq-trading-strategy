@@ -9,7 +9,10 @@ python3 -m pip install --user --break-system-packages -r requirements.txt
 # Download price data (cached to data/ as CSV)
 python3 main.py download
 
-# Run backtest with custom dates
+# Refresh cached data to the latest bar (incremental daily update)
+python3 main.py update
+
+# Run backtest with custom dates (end defaults to today)
 python3 main.py backtest 2020-01-01 2026-05-01
 
 # Run forward test (paper trading simulation, persists state in forward_state.json)

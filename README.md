@@ -103,7 +103,10 @@ python3 -m pip install --user --break-system-packages -r requirements.txt
 # Download and cache data
 python3 main.py download
 
-# Run backtest (custom dates)
+# Refresh cached data to the latest bar (daily incremental update)
+python3 main.py update
+
+# Run backtest (custom dates; end defaults to today)
 python3 main.py backtest 2020-01-01 2026-05-01
 
 # Run forward test (paper trading simulation)
@@ -171,6 +174,26 @@ Edit `config.py`:
 - Downloads in 6-month chunks to avoid yfinance throttling
 - Incremental updates (only fetches new data)
 - **Auto stock-split detection**: validates cache against fresh data on each run; re-downloads if prices differ > 1%
+
+### Daily Data Updates
+
+The backtest data is kept current with the latest market day in two ways:
+
+1. **In-app auto-refresh** — the dashboard extends the cache to the latest bar on
+   load and every 6 hours (guarded to hit the network at most once per calendar
+   day). A "Data current → YYYY-MM-DD" indicator shows in the header. Every
+   backtest run also triggers the same guarded refresh, so `DEFAULT_BACKTEST_END`
+   defaults to today.
+
+2. **Scheduled cron** — for headless daily updates, run `main.py update`. It
+   incrementally appends only the new bars and records the last update date in
+   `data/.last_update.json` (use `--force` to bypass the once-per-day guard):
+
+   ```bash
+   # Update every weekday at 6:00 PM ET (22:00 UTC), after market close.
+   # Adjust the venv/repo paths to your deployment.
+   0 22 * * 1-5 cd ~/tqqq-trading-strategy && source ~/trading-venv/bin/activate && python3 main.py update >> ~/logs/data_update.log 2>&1
+   ```
 
 ## Alpaca Paper Trading
 

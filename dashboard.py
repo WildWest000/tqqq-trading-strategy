@@ -12,6 +12,7 @@ Redesigned with:
 """
 import pandas as pd
 import numpy as np
+import os
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dash import Dash, html, dcc, Output, Input, State, callback_context, no_update
@@ -21,6 +22,7 @@ from functools import lru_cache
 import config
 from backtest import run_backtest
 from forward_test import run_forward_test, load_state
+import paper_trade_reader as ptr
 
 
 app = Dash(__name__, external_stylesheets=[dbc.themes.DARKLY])
@@ -50,6 +52,137 @@ def section_card(title, children, id=None):
     ], **props)
 
 
+# --- Tab Content Builders ---
+
+def _backtest_tab():
+    """Tab 1: backtest KPIs, charts, trade log, and forward test."""
+    return html.Div([
+        # KPI Summary Row
+        dbc.Row(id="kpi-row", children=[
+            dbc.Col(kpi_card("Total Return", "—"), width=2),
+            dbc.Col(kpi_card("Sharpe Ratio", "—"), width=2),
+            dbc.Col(kpi_card("Max Drawdown", "—"), width=2),
+            dbc.Col(kpi_card("vs B&H", "—"), width=2),
+            dbc.Col(kpi_card("Trades", "—"), width=2),
+            dbc.Col(kpi_card("Win Rate", "—"), width=2),
+        ], className="mb-3 g-2"),
+
+        # Main charts: equity + drawdown side by side
+        dbc.Row([
+            dbc.Col([
+                dcc.Loading(
+                    dcc.Graph(id="equity-chart", config={"displayModeBar": False}),
+                    type="circle", color="#00d4aa"
+                ),
+            ], lg=8),
+            dbc.Col([
+                dcc.Loading(
+                    dcc.Graph(id="drawdown-chart", config={"displayModeBar": False}),
+                    type="circle", color="#ff6b6b"
+                ),
+            ], lg=4),
+        ], className="mb-2"),
+
+        # Secondary row: Signals + Rolling Metrics
+        dbc.Row([
+            dbc.Col([
+                dcc.Loading(
+                    dcc.Graph(id="signals-chart", config={"displayModeBar": False}),
+                    type="circle", color="#4ecdc4"
+                ),
+            ], lg=8),
+            dbc.Col([
+                dcc.Loading(
+                    dcc.Graph(id="rolling-chart", config={"displayModeBar": False}),
+                    type="circle", color="#ffe66d"
+                ),
+            ], lg=4),
+        ], className="mb-2"),
+
+        # Trade log + Forward test
+        dbc.Row([
+            dbc.Col([
+                section_card("Trade Log", [
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Select(
+                                id="trade-filter",
+                                options=[
+                                    {"label": "All Trades", "value": "all"},
+                                    {"label": "Bullish Only", "value": "bullish"},
+                                    {"label": "Defensive Only", "value": "defensive"},
+                                    {"label": "Trailing Stops", "value": "stops"},
+                                ],
+                                value="all",
+                                size="sm",
+                                className="bg-dark text-light mb-2",
+                            ),
+                        ], width=3),
+                    ]),
+                    html.Div(id="trade-log", style={"maxHeight": "400px", "overflowY": "auto"}),
+                ]),
+            ], lg=8),
+            dbc.Col([
+                section_card("Forward Test", [
+                    dbc.Button("Run Forward Test", id="forward-btn", color="success", size="sm",
+                              className="mb-2"),
+                    html.Div(id="forward-panel"),
+                ]),
+            ], lg=4),
+        ]),
+    ], className="pt-2")
+
+
+def _confirmations_tab():
+    """Tab 2: live Alpaca paper-bot status + parsed order confirmations."""
+    return html.Div([
+        dbc.Row([
+            dbc.Col(html.Small(
+                "Live paper-trading bot — read from paper_trade/state.json and logs/trade_*.log",
+                className="text-muted"), width=9),
+            dbc.Col(
+                dbc.Button("↻ Refresh", id="confirm-refresh-btn", color="secondary",
+                           size="sm", className="float-end"),
+                width=3),
+        ], className="align-items-center mb-2 pt-2"),
+
+        # Bot status KPI cards
+        dbc.Row(id="bot-status-cards", className="mb-3 g-2"),
+
+        # Confirmations table
+        section_card("Order Confirmations & Events", [
+            html.Div(id="confirmations-table",
+                     style={"maxHeight": "480px", "overflowY": "auto"}),
+        ]),
+    ])
+
+
+def _logs_tab():
+    """Tab 3: raw daily bot log viewer."""
+    return html.Div([
+        dbc.Row([
+            dbc.Col(
+                dbc.Select(id="log-file-select", size="sm",
+                           className="bg-dark text-light"),
+                width=6),
+            dbc.Col(
+                dbc.Button("↻ Refresh", id="log-refresh-btn", color="secondary",
+                           size="sm", className="float-end"),
+                width=3),
+            dbc.Col(html.Div(id="log-file-meta", className="text-muted small pt-1 text-end"),
+                    width=3),
+        ], className="align-items-center mb-2 pt-2"),
+
+        dbc.Card(dbc.CardBody(
+            html.Pre(id="log-content",
+                     style={"maxHeight": "560px", "overflowY": "auto",
+                            "fontSize": "0.75rem", "whiteSpace": "pre-wrap",
+                            "marginBottom": "0"}),
+            className="p-2",
+        )),
+    ])
+
+
 # --- Layout ---
 
 app.layout = dbc.Container([
@@ -75,81 +208,18 @@ app.layout = dbc.Container([
         ], width=6),
         dbc.Col([
             html.Div(id="status-msg", className="text-info small text-end pt-1"),
+            html.Div(id="data-freshness", className="text-muted small text-end"),
         ], width=2),
     ], className="py-2 mb-2 border-bottom border-secondary align-items-center"),
     
-    # KPI Summary Row
-    dbc.Row(id="kpi-row", children=[
-        dbc.Col(kpi_card("Total Return", "—"), width=2),
-        dbc.Col(kpi_card("Sharpe Ratio", "—"), width=2),
-        dbc.Col(kpi_card("Max Drawdown", "—"), width=2),
-        dbc.Col(kpi_card("vs B&H", "—"), width=2),
-        dbc.Col(kpi_card("Trades", "—"), width=2),
-        dbc.Col(kpi_card("Win Rate", "—"), width=2),
-    ], className="mb-3 g-2"),
+    # Daily data auto-refresh (fires on load and every 6 hours)
+    dcc.Interval(id="data-refresh-interval", interval=6 * 60 * 60 * 1000, n_intervals=0),
     
-    # Main charts: equity + drawdown side by side
-    dbc.Row([
-        dbc.Col([
-            dcc.Loading(
-                dcc.Graph(id="equity-chart", config={"displayModeBar": False}),
-                type="circle", color="#00d4aa"
-            ),
-        ], lg=8),
-        dbc.Col([
-            dcc.Loading(
-                dcc.Graph(id="drawdown-chart", config={"displayModeBar": False}),
-                type="circle", color="#ff6b6b"
-            ),
-        ], lg=4),
-    ], className="mb-2"),
-    
-    # Secondary row: Signals + Rolling Metrics
-    dbc.Row([
-        dbc.Col([
-            dcc.Loading(
-                dcc.Graph(id="signals-chart", config={"displayModeBar": False}),
-                type="circle", color="#4ecdc4"
-            ),
-        ], lg=8),
-        dbc.Col([
-            dcc.Loading(
-                dcc.Graph(id="rolling-chart", config={"displayModeBar": False}),
-                type="circle", color="#ffe66d"
-            ),
-        ], lg=4),
-    ], className="mb-2"),
-    
-    # Trade log + Forward test
-    dbc.Row([
-        dbc.Col([
-            section_card("Trade Log", [
-                dbc.Row([
-                    dbc.Col([
-                        dbc.Select(
-                            id="trade-filter",
-                            options=[
-                                {"label": "All Trades", "value": "all"},
-                                {"label": "Bullish Only", "value": "bullish"},
-                                {"label": "Defensive Only", "value": "defensive"},
-                                {"label": "Trailing Stops", "value": "stops"},
-                            ],
-                            value="all",
-                            size="sm",
-                            className="bg-dark text-light mb-2",
-                        ),
-                    ], width=3),
-                ]),
-                html.Div(id="trade-log", style={"maxHeight": "400px", "overflowY": "auto"}),
-            ]),
-        ], lg=8),
-        dbc.Col([
-            section_card("Forward Test", [
-                dbc.Button("Run Forward Test", id="forward-btn", color="success", size="sm",
-                          className="mb-2"),
-                html.Div(id="forward-panel"),
-            ]),
-        ], lg=4),
+    # Tabbed interface
+    dbc.Tabs(id="main-tabs", active_tab="tab-backtest", className="mb-3", children=[
+        dbc.Tab(label="Backtesting", tab_id="tab-backtest", children=_backtest_tab()),
+        dbc.Tab(label="Trading Confirmations", tab_id="tab-confirm", children=_confirmations_tab()),
+        dbc.Tab(label="Logs", tab_id="tab-logs", children=_logs_tab()),
     ]),
     
     # Hidden stores
@@ -482,6 +552,157 @@ def run_forward_callback(n_clicks):
         ], bordered=True, color="dark", size="sm", className="mt-2"))
     
     return content
+
+
+# --- Daily Data Refresh Callback ---
+
+@app.callback(
+    Output("data-freshness", "children"),
+    Input("data-refresh-interval", "n_intervals"),
+    prevent_initial_call=False,
+)
+def auto_refresh_data(n_intervals):
+    """Refresh cached price data to the latest bar (guarded once/day)."""
+    from download_data import refresh_latest
+    try:
+        summary = refresh_latest()
+    except Exception as e:
+        return f"⚠ data refresh failed: {str(e)[:40]}"
+    latest = summary.get("latest_date") or "—"
+    tag = "updated" if summary.get("updated") else "current"
+    return f"Data {tag} → {latest}"
+
+
+# --- Trading Confirmations Tab Callbacks ---
+
+@app.callback(
+    [Output("bot-status-cards", "children"),
+     Output("confirmations-table", "children")],
+    [Input("confirm-refresh-btn", "n_clicks"),
+     Input("main-tabs", "active_tab")],
+    prevent_initial_call=False,
+)
+def refresh_confirmations(n_clicks, active_tab):
+    """Load Alpaca bot state + parsed order confirmations from disk."""
+    state = ptr.load_bot_state()
+    events = ptr.parse_confirmations()
+    return _build_bot_status_cards(state), _build_confirmations_table(events)
+
+
+# --- Logs Tab Callbacks ---
+
+@app.callback(
+    [Output("log-file-select", "options"),
+     Output("log-file-select", "value")],
+    [Input("log-refresh-btn", "n_clicks"),
+     Input("main-tabs", "active_tab")],
+    [State("log-file-select", "value")],
+    prevent_initial_call=False,
+)
+def refresh_log_files(n_clicks, active_tab, current_value):
+    """Populate the log-file dropdown, newest first; keep selection if still valid."""
+    files = ptr.list_log_files()
+    options = [{"label": f["name"], "value": f["path"]} for f in files]
+    valid_paths = {f["path"] for f in files}
+    if current_value in valid_paths:
+        value = current_value
+    else:
+        value = files[0]["path"] if files else None
+    return options, value
+
+
+@app.callback(
+    [Output("log-content", "children"),
+     Output("log-file-meta", "children")],
+    [Input("log-file-select", "value"),
+     Input("log-refresh-btn", "n_clicks")],
+    prevent_initial_call=False,
+)
+def display_log(path, n_clicks):
+    """Show the tail of the selected log file plus its size."""
+    if not path:
+        return ("No bot logs found. The Alpaca bot writes to "
+                "paper_trade/logs/trade_YYYYMMDD.log once it runs."), ""
+    content = ptr.read_log_file(path)
+    try:
+        size = os.path.getsize(path)
+        meta = f"{size:,} bytes"
+    except OSError:
+        meta = ""
+    return content, meta
+
+
+# --- Helper Functions ---
+
+def _build_bot_status_cards(state):
+    """KPI cards summarizing the live bot's persisted state.json."""
+    if not state:
+        return [dbc.Col(kpi_card(
+            "Bot Status", "No state", "state.json not found — bot hasn't run", "warning"
+        ), width=12)]
+
+    last_run = state.get("last_run") or "—"
+    if isinstance(last_run, str) and "T" in last_run:
+        last_run = last_run.replace("T", " ")[:19]
+    regime = str(state.get("last_regime", "unknown"))
+    in_cash = state.get("in_cash_mode", False)
+    cash_days = state.get("cash_mode_days", 0)
+    peak = state.get("portfolio_peak", 0) or 0
+
+    regime_color = "success" if regime == "bull" else (
+        "danger" if regime in ("bear", "crisis") else "warning")
+    cash_color = "danger" if in_cash else "success"
+
+    return [
+        dbc.Col(kpi_card("Last Run", last_run, "most recent bot cycle"), width=3),
+        dbc.Col(kpi_card("Last Regime", regime.upper(), color=regime_color), width=3),
+        dbc.Col(kpi_card(
+            "Trailing Stop", "IN CASH" if in_cash else "ACTIVE",
+            f"cooldown day {cash_days}/5" if in_cash else "tracking peak",
+            cash_color), width=3),
+        dbc.Col(kpi_card("Portfolio Peak", f"${peak:,.0f}", "trailing-stop reference"), width=3),
+    ]
+
+
+_CONFIRM_BADGE = {
+    "order_submitted": ("SUBMITTED", "info"),
+    "order_filled": ("FILLED", "success"),
+    "order_failed": ("FAILED", "danger"),
+    "trailing_stop": ("TRAILING STOP", "danger"),
+    "rebalance": ("REBALANCED", "primary"),
+    "no_action": ("NO ACTION", "secondary"),
+    "cash_mode": ("CASH MODE", "warning"),
+}
+
+
+def _build_confirmations_table(events):
+    """Render parsed bot events as a table, newest first."""
+    if not events:
+        return html.P(
+            "No order confirmations yet. They appear here once the Alpaca bot "
+            "submits trades (paper_trade/logs/trade_*.log).",
+            className="text-muted")
+
+    rows = []
+    for ev in events:
+        label, color = _CONFIRM_BADGE.get(ev["type"], (ev["type"].upper(), "secondary"))
+        if "symbol" in ev:
+            detail = f"{ev['side'].upper()} {ev['qty']} {ev['symbol']}"
+        else:
+            detail = ev["message"][:80]
+        rows.append(html.Tr([
+            html.Td(ev["timestamp"], className="small text-nowrap"),
+            html.Td(dbc.Badge(label, color=color, className="small")),
+            html.Td(detail, className="small"),
+        ]))
+
+    header = html.Thead(html.Tr([
+        html.Th("Time", className="small"),
+        html.Th("Event", className="small"),
+        html.Th("Detail", className="small"),
+    ]))
+    return dbc.Table([header, html.Tbody(rows)],
+                     bordered=True, hover=True, color="dark", size="sm", striped=True)
 
 
 # --- Helper Functions ---

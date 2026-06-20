@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 venv/
 data/*.csv
+data/.last_update.json
 paper_trade/.env
 paper_trade/state.json
 paper_trade/logs/

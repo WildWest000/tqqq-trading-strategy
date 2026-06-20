@@ -2,6 +2,7 @@
 CLI entry point for the TQQQ/SQQQ Mean Reversion Trading Strategy.
 Usage:
     python main.py download       - Download/update price data
+    python main.py update         - Refresh cached data to the latest bar (daily)
     python main.py backtest       - Run backtest and print results
     python main.py forward        - Run one forward test iteration
     python main.py dashboard      - Launch the interactive dashboard
@@ -28,6 +29,15 @@ def main():
                 print(f"  {ticker}: {len(df)} rows ({df.index.min().date()} to {df.index.max().date()})")
             else:
                 print(f"  {ticker}: No data")
+    
+    elif command == "update":
+        from download_data import refresh_latest
+        print("Refreshing cached data to the latest bar...")
+        force = "--force" in sys.argv[2:]
+        summary = refresh_latest(status_callback=print_status, force=force)
+        print(f"\n  Updated: {summary['updated']} | "
+              f"Last update: {summary['last_update']} | "
+              f"Latest bar: {summary['latest_date']}")
     
     elif command == "backtest":
         from backtest import run_backtest

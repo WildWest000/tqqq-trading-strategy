@@ -103,6 +103,14 @@ def run_backtest(start: str = None, end: str = None, status_callback=None) -> di
     if end is None:
         end = config.DEFAULT_BACKTEST_END
     
+    # Daily auto-update: extend cache to the latest bar (no-op if already done today)
+    from download_data import refresh_latest
+    try:
+        refresh_latest(status_callback)
+    except Exception as e:
+        if status_callback:
+            status_callback(f"Daily refresh skipped: {e}")
+    
     # Ensure data is available
     if status_callback:
         status_callback("Ensuring data is available...")

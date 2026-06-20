@@ -111,10 +111,15 @@ def run_backtest(start: str = None, end: str = None, status_callback=None) -> di
         if status_callback:
             status_callback(f"Daily refresh skipped: {e}")
     
+    # Fetch a warm-up buffer of data BEFORE `start` so indicators (50-day EMA,
+    # momentum, volatility, RSI) are primed even for short backtest windows.
+    # Signals are sliced back to the requested window after generation.
+    warmup_start = (pd.Timestamp(start) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+    
     # Ensure data is available
     if status_callback:
         status_callback("Ensuring data is available...")
-    data = ensure_data_available(start, end, status_callback)
+    data = ensure_data_available(warmup_start, end, status_callback)
     
     tqqq = data["TQQQ"]
     sqqq = data["SQQQ"]
@@ -132,17 +137,25 @@ def run_backtest(start: str = None, end: str = None, status_callback=None) -> di
             # Use all cached data up to end date for training
             qqq_full = qqq_full[qqq_full.index <= pd.Timestamp(end)]
     
-    # Generate signals
+    # Generate signals (on the warm-up-extended data)
     if status_callback:
         status_callback("Generating signals...")
     signals_df = generate_signals(tqqq, sqqq, qqq, qqq_full=qqq_full)
+    
+    # Slice signals back to the requested window now that indicators are primed
+    signals_df = signals_df[signals_df.index >= pd.Timestamp(start)]
+    if len(signals_df) == 0:
+        raise ValueError(
+            f"No tradeable data between {start} and {end}. "
+            "Try widening the date range (indicators need prior history to warm up)."
+        )
     
     # Run strategy
     if status_callback:
         status_callback("Running strategy...")
     portfolio_df, trades_df = run_strategy(signals_df)
     
-    # Compute benchmark
+    # Compute benchmark (masks to the requested [start, end] window internally)
     benchmark_df = compute_benchmark(tqqq, start, end)
     
     # Compute metrics

@@ -177,7 +177,14 @@ def run_strategy(signals_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
             "signal": signal,
         })
     
-    portfolio_df = pd.DataFrame(portfolio_records).set_index("date")
+    portfolio_df = (
+        pd.DataFrame(portfolio_records).set_index("date")
+        if portfolio_records
+        else pd.DataFrame(columns=[
+            "portfolio_value", "tqqq_value", "sqqq_value", "cash",
+            "tqqq_alloc", "sqqq_alloc", "regime", "signal",
+        ]).rename_axis("date")
+    )
     trades_df = pd.DataFrame(trade_records) if trade_records else pd.DataFrame(
         columns=["date", "signal", "regime", "tqqq_action", "tqqq_shares_delta",
                  "tqqq_price", "tqqq_alloc_from", "tqqq_alloc_to",

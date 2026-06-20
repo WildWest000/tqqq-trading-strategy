@@ -7,6 +7,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BOT_SCRIPT="$SCRIPT_DIR/alpaca_bot.py"
 ENV_FILE="$SCRIPT_DIR/.env"
 
@@ -45,6 +46,11 @@ pip install --user --break-system-packages -q alpaca-trade-api yfinance pandas n
 pip install --user -q alpaca-trade-api yfinance pandas numpy
 echo "  ✓ Dependencies installed"
 
+# --- Step 2b: Ensure log directories exist ---
+# (the bot writes to paper_trade/logs/; data updates and any ~/logs cron go to ~/logs)
+mkdir -p "$SCRIPT_DIR/logs" "$HOME/logs"
+echo "  ✓ Log directories ready: $SCRIPT_DIR/logs and $HOME/logs"
+
 # --- Step 3: Create wrapper script ---
 WRAPPER="$SCRIPT_DIR/run_bot.sh"
 cat > "$WRAPPER" << WRAPPER_EOF
@@ -67,6 +73,23 @@ WRAPPER_EOF
 chmod +x "$WRAPPER"
 echo "  ✓ Wrapper script created: $WRAPPER"
 
+# --- Step 3b: Create data-update wrapper script ---
+# Keeps the cached price data current to the latest bar (runs after market close).
+UPDATE_WRAPPER="$SCRIPT_DIR/run_update.sh"
+cat > "$UPDATE_WRAPPER" << UPDATE_EOF
+#!/bin/bash
+# Wrapper script for cron — refreshes cached price data to the latest bar
+set -e
+
+# Ensure Python can find user-installed packages
+export PATH="\$HOME/.local/bin:\$PATH"
+
+cd "$REPO_DIR"
+python3 main.py update >> "\$HOME/logs/data_update.log" 2>&1
+UPDATE_EOF
+chmod +x "$UPDATE_WRAPPER"
+echo "  ✓ Data-update wrapper created: $UPDATE_WRAPPER"
+
 # --- Step 4: Set up cron ---
 # 3:30 PM EST = 19:30 UTC (EST = UTC-5)
 # During EDT (daylight saving, Mar-Nov): 3:30 PM EDT = 19:30 UTC
@@ -76,16 +99,20 @@ echo "  ✓ Wrapper script created: $WRAPPER"
 # check if market is open (it exits immediately if market is closed).
 CRON_LINE_EDT="30 19 * * 1-5 $WRAPPER"
 CRON_LINE_EST="30 20 * * 1-5 $WRAPPER"
+# Data refresh: 22:00 UTC (after US market close in both EST/EDT)
+CRON_LINE_UPDATE="0 22 * * 1-5 $UPDATE_WRAPPER"
 
 echo ""
 echo "Setting up cron job..."
 
-# Remove any existing bot entries
-(crontab -l 2>/dev/null || true) | grep -v "$WRAPPER" > /tmp/cron_tmp || true
+# Remove any existing bot/update entries
+(crontab -l 2>/dev/null || true) | grep -v "$WRAPPER" | grep -v "$UPDATE_WRAPPER" > /tmp/cron_tmp || true
 
 # Add both time slots
 echo "$CRON_LINE_EDT" >> /tmp/cron_tmp
 echo "$CRON_LINE_EST" >> /tmp/cron_tmp
+# Add daily data refresh
+echo "$CRON_LINE_UPDATE" >> /tmp/cron_tmp
 
 crontab /tmp/cron_tmp
 rm /tmp/cron_tmp
@@ -93,9 +120,11 @@ rm /tmp/cron_tmp
 echo "  ✓ Cron jobs installed:"
 echo "    $CRON_LINE_EDT"
 echo "    $CRON_LINE_EST"
+echo "    $CRON_LINE_UPDATE"
 echo ""
 echo "  The bot runs at both 19:30 and 20:30 UTC to cover EST/EDT."
 echo "  It checks if the market is open and exits early if not."
+echo "  Price data is refreshed daily at 22:00 UTC (after market close)."
 
 # --- Step 5: Verify ---
 echo ""
@@ -109,6 +138,7 @@ echo "  source $ENV_FILE && python3 $BOT_SCRIPT"
 echo ""
 echo "View logs:"
 echo "  tail -f $SCRIPT_DIR/logs/cron.log"
+echo "  tail -f $HOME/logs/data_update.log"
 echo "  ls $SCRIPT_DIR/logs/"
 echo ""
 echo "View/edit state:"

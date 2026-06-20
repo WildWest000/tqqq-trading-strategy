@@ -7,5 +7,6 @@ paper_trade/.env
 paper_trade/state.json
 paper_trade/logs/
 paper_trade/run_bot.sh
+paper_trade/run_update.sh
 *.log
 .DS_Store

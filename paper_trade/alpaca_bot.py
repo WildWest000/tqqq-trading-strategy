@@ -11,8 +11,15 @@ Setup:
   3. Set environment variables:
        export ALPACA_API_KEY="your-key"
        export ALPACA_SECRET_KEY="your-secret"
+       # Optional — defaults to paper. Set to "false" for LIVE real-money trading:
+       export ALPACA_PAPER="true"
+       # (Advanced) or override the endpoint directly:
+       # export ALPACA_BASE_URL="https://api.alpaca.markets"
   4. Install deps: pip install alpaca-trade-api yfinance pandas numpy
   5. Schedule with cron (see cron_setup.sh)
+
+Note: paper and live use DIFFERENT API keys. When switching to live, update
+ALPACA_API_KEY/ALPACA_SECRET_KEY with your live keys as well as ALPACA_PAPER.
 """
 import os
 import sys
@@ -37,7 +44,32 @@ except ImportError:
 # --- Configuration ---
 ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "")
-ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
+
+PAPER_URL = "https://paper-api.alpaca.markets"
+LIVE_URL = "https://api.alpaca.markets"
+
+
+def _resolve_endpoint():
+    """
+    Resolve the Alpaca endpoint and trading mode from the environment.
+
+    Precedence:
+      1. ALPACA_BASE_URL  — explicit full URL override (advanced).
+      2. ALPACA_PAPER     — "true"/"1"/"yes" (default) → paper; "false"/"0"/"no" → live.
+
+    Defaults to PAPER for safety. Returns (base_url, is_paper).
+    """
+    explicit = os.environ.get("ALPACA_BASE_URL", "").strip()
+    if explicit:
+        is_paper = "paper-api" in explicit
+        return explicit, is_paper
+
+    paper_flag = os.environ.get("ALPACA_PAPER", "true").strip().lower()
+    is_paper = paper_flag not in ("false", "0", "no", "off", "live")
+    return (PAPER_URL if is_paper else LIVE_URL), is_paper
+
+
+ALPACA_BASE_URL, ALPACA_IS_PAPER = _resolve_endpoint()
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
@@ -79,6 +111,8 @@ def get_alpaca_api():
     if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
         logger.error("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set")
         sys.exit(1)
+    mode = "PAPER" if ALPACA_IS_PAPER else "LIVE 🔴 REAL MONEY"
+    logger.info(f"Alpaca mode: {mode} ({ALPACA_BASE_URL})")
     return tradeapi.REST(ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_BASE_URL, api_version="v2")
 
 

@@ -315,6 +315,44 @@ def run_backtest_callback(n_clicks, start_date, end_date):
     if "regime" in portfolio_df.columns:
         _add_regime_shading(equity_fig, portfolio_df["regime"], regime_colors)
     
+    # Buy / Sell / Rebalance markers on the equity curve
+    if len(trades_df) > 0:
+        td = trades_df.copy()
+        td["date"] = pd.to_datetime(td["date"])
+        if "portfolio_value" not in td.columns:
+            td["portfolio_value"] = portfolio_df["portfolio_value"].reindex(
+                td["date"], method="nearest").values
+        stops = td[td["signal"] == "trailing_stop_triggered"]
+        buys = td[(td["tqqq_action"] == "buy") & (td["signal"] != "trailing_stop_triggered")]
+        sells = td[(td["tqqq_action"] == "sell") & (td["signal"] != "trailing_stop_triggered")]
+        if len(buys) > 0:
+            equity_fig.add_trace(go.Scatter(
+                x=buys["date"], y=buys["portfolio_value"],
+                mode="markers", name="Buy",
+                marker=dict(symbol="triangle-up", size=10, color="#2ecc71",
+                            line=dict(width=1, color="#0b3d24")),
+                customdata=buys["signal"],
+                hovertemplate="BUY (%{customdata})<br>$%{y:,.0f}<extra></extra>"
+            ))
+        if len(sells) > 0:
+            equity_fig.add_trace(go.Scatter(
+                x=sells["date"], y=sells["portfolio_value"],
+                mode="markers", name="Sell / Rebalance",
+                marker=dict(symbol="triangle-down", size=10, color="#ff6b6b",
+                            line=dict(width=1, color="#5a1a1a")),
+                customdata=sells["signal"],
+                hovertemplate="SELL (%{customdata})<br>$%{y:,.0f}<extra></extra>"
+            ))
+        if len(stops) > 0:
+            equity_fig.add_trace(go.Scatter(
+                x=stops["date"], y=stops["portfolio_value"],
+                mode="markers", name="Trailing Stop",
+                marker=dict(symbol="x", size=11, color="#f1c40f",
+                            line=dict(width=1, color="#7a6200")),
+                customdata=stops["signal"],
+                hovertemplate="TRAILING STOP → cash<br>$%{y:,.0f}<extra></extra>"
+            ))
+    
     # Annotate max drawdown point
     values = portfolio_df["portfolio_value"]
     cummax = values.cummax()

@@ -4,7 +4,7 @@ Read and parse Alpaca paper-trading bot artifacts for the dashboard.
 The live bot (paper_trade/alpaca_bot.py) persists:
 - paper_trade/state.json: trailing-stop state {portfolio_peak, in_cash_mode,
   cash_mode_days, last_regime, last_run}
-- paper_trade/logs/trade_YYYYMMDD.log: human-readable daily logs whose lines
+- paper_trade/logs/trade_YYYYMM.log: human-readable monthly logs whose lines
   follow the format "%(asctime)s [%(levelname)s] %(message)s".
 
 This module loads that state and extracts structured order confirmations and
@@ -47,7 +47,7 @@ def list_log_files() -> list[dict]:
     List available bot log files, newest first.
 
     Returns a list of {"name", "path", "mtime", "size"} dicts covering the
-    daily trade logs and a cron.log if present.
+    monthly trade logs and a cron.log if present.
     """
     if not os.path.isdir(LOG_DIR):
         return []

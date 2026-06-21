@@ -80,8 +80,9 @@ LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 
 # --- Logging ---
+# One log file per month (e.g. trade_202606.log); runs append to it all month.
 os.makedirs(LOG_DIR, exist_ok=True)
-log_file = os.path.join(LOG_DIR, f"trade_{datetime.now().strftime('%Y%m%d')}.log")
+log_file = os.path.join(LOG_DIR, f"trade_{datetime.now().strftime('%Y%m')}.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",

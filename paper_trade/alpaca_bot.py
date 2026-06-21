@@ -18,6 +18,11 @@ Setup:
   4. Install deps: pip install alpaca-trade-api yfinance pandas numpy
   5. Schedule with cron (see cron_setup.sh)
 
+Usage:
+  python3 paper_trade/alpaca_bot.py            # normal run (places orders)
+  python3 paper_trade/alpaca_bot.py --dry-run  # preview signal + intended
+                                               # trades; no orders, no state write
+
 Note: paper and live use DIFFERENT API keys. When switching to live, update
 ALPACA_API_KEY/ALPACA_SECRET_KEY with your live keys as well as ALPACA_PAPER.
 """
@@ -180,9 +185,11 @@ def compute_regime_and_allocation():
     return regime, tqqq_alloc, sqqq_alloc, current_rsi
 
 
-def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc):
+def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc, dry_run=False):
     """
     Rebalance portfolio to target allocations using market orders.
+
+    When dry_run is True, the intended orders are logged but NOT submitted.
     """
     equity, cash = get_account_value(api)
     tqqq_shares, sqqq_shares, tqqq_value, sqqq_value = get_current_positions(api)
@@ -237,6 +244,9 @@ def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc):
     for symbol, side, qty in orders:
         if qty == 0:
             continue
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would submit: {side.upper()} {qty} {symbol} (no order placed)")
+            continue
         logger.info(f"Submitting: {side.upper()} {qty} {symbol}")
         try:
             api.submit_order(
@@ -253,18 +263,26 @@ def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc):
     return True
 
 
-def run():
-    """Main entry point — called by cron at 3:30 PM EST on trading days."""
+def run(dry_run=False):
+    """Main entry point — called by cron at 3:30 PM EST on trading days.
+
+    When dry_run is True, computes the signal and prints the intended trades
+    WITHOUT placing any orders or persisting state. The market-open gate is
+    skipped so you can preview the decision at any time.
+    """
     logger.info("=" * 60)
-    logger.info("TQQQ/SQQQ Paper Trading Bot — Starting")
+    banner = "TQQQ/SQQQ Bot — DRY RUN (no orders)" if dry_run else "TQQQ/SQQQ Paper Trading Bot — Starting"
+    logger.info(banner)
     logger.info("=" * 60)
 
     api = get_alpaca_api()
 
-    # Check market is open
-    if not is_market_open(api):
+    # Check market is open (skipped in dry-run so the signal can be previewed anytime)
+    if not dry_run and not is_market_open(api):
         logger.info("Market is closed — skipping")
         return
+    if dry_run and not is_market_open(api):
+        logger.info("Market is closed (dry-run: previewing signal anyway)")
 
     # Load state
     state = load_state()
@@ -311,14 +329,17 @@ def run():
         sqqq_alloc = 0.0
 
     # Execute rebalance
-    traded = execute_rebalance(api, tqqq_alloc, sqqq_alloc)
+    traded = execute_rebalance(api, tqqq_alloc, sqqq_alloc, dry_run=dry_run)
 
-    # Update state
-    state["last_regime"] = regime
-    state["last_run"] = datetime.now().isoformat()
-    save_state(state)
+    # Update state (skipped in dry-run — preview only)
+    if not dry_run:
+        state["last_regime"] = regime
+        state["last_run"] = datetime.now().isoformat()
+        save_state(state)
 
-    if traded:
+    if dry_run:
+        logger.info("Dry-run complete — no orders placed, state unchanged ✓")
+    elif traded:
         logger.info("Rebalance complete ✓")
     else:
         logger.info("No action needed ✓")
@@ -327,4 +348,5 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    dry_run = any(a in ("--dry-run", "--dryrun", "-n") for a in sys.argv[1:])
+    run(dry_run=dry_run)

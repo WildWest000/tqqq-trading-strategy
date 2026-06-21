@@ -186,13 +186,17 @@ def _map_states_to_regimes(states: np.ndarray, features_df: pd.DataFrame, n_stat
     return mapping
 
 
-def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, qqq_full: pd.DataFrame = None) -> pd.DataFrame:
+def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, qqq_full: pd.DataFrame = None, shift_signals: bool = True) -> pd.DataFrame:
     """
     Generate allocation signals using a regime-based dual-allocation approach.
     
     Args:
         tqqq, sqqq, qqq: Price data for the backtest period
         qqq_full: Full historical QQQ data for HMM training (optional, used when REGIME_METHOD="hmm")
+        shift_signals: When True (backtest), allocations are shifted forward 1 day so a
+            signal computed from today's close is acted on at the next day's open
+            (no look-ahead). When False (live trading at/near the close), the latest
+            bar holds the decision derived from that same bar's close.
     
     Returns a DataFrame with:
     - Prices, indicators
@@ -268,8 +272,9 @@ def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, 
         df["regime"] = np.where(mom > 0, "bull", "bear")
         
         # Shift signals forward 1 day (no look-ahead)
-        for col in ["tqqq_alloc", "sqqq_alloc", "regime"]:
-            df[col] = df[col].shift(1)
+        if shift_signals:
+            for col in ["tqqq_alloc", "sqqq_alloc", "regime"]:
+                df[col] = df[col].shift(1)
         
         df["cash_alloc"] = 1.0 - df["tqqq_alloc"] - df["sqqq_alloc"]
         
@@ -419,8 +424,9 @@ def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, 
     # --- Shift Signals Forward by 1 Day ---
     # Signals are computed from today's close but can only be ACTED ON next trading day.
     # This eliminates look-ahead bias: we decide after close, execute at next day's open.
-    for col in ["tqqq_alloc", "sqqq_alloc", "cash_alloc", "regime"]:
-        df[col] = df[col].shift(1)
+    if shift_signals:
+        for col in ["tqqq_alloc", "sqqq_alloc", "cash_alloc", "regime"]:
+            df[col] = df[col].shift(1)
     
     # --- Signal Labels ---
     df["signal"] = "hold"

@@ -27,7 +27,6 @@ import yfinance as yf
 # Add parent directory for strategy modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
-from indicators import compute_rsi, compute_ema, compute_atr
 
 try:
     import alpaca_trade_api as tradeapi
@@ -108,9 +107,18 @@ def get_account_value(api):
 def compute_regime_and_allocation():
     """
     Download recent data and compute current regime + target allocation.
-    Uses the same logic as indicators.py but on live data.
+
+    Uses the SAME signal engine as the backtest (indicators.generate_signals),
+    so the live bot honors config.REGIME_METHOD (e.g. "mom_vol") and produces
+    identical decisions to the dashboard/backtest. Signals are computed
+    unshifted (shift_signals=False) because the bot runs at/near the close and
+    acts on the latest bar's own close.
     """
-    lookback_days = 120  # Need enough history for indicators
+    import indicators
+
+    # ~400 calendar days of history mirrors the backtest warm-up buffer, so the
+    # 50-day EMA and expanding medians are well primed before the latest bar.
+    lookback_days = 400
 
     qqq = yf.download("QQQ", period=f"{lookback_days}d", progress=False, auto_adjust=True)
     tqqq = yf.download("TQQQ", period=f"{lookback_days}d", progress=False, auto_adjust=True)
@@ -124,87 +132,16 @@ def compute_regime_and_allocation():
         logger.error(f"Insufficient data: QQQ={len(qqq)}, TQQQ={len(tqqq)} bars")
         return None, None, None, None
 
-    # --- Core Indicators (on QQQ) ---
-    qqq_close = qqq["Close"]
-    qqq_ema_trend = compute_ema(qqq_close, config.EMA_TREND)
-    qqq_ema_short = compute_ema(qqq_close, config.EMA_SHORT)
-    qqq_momentum = qqq_close.pct_change(10)
+    signals = indicators.generate_signals(tqqq, sqqq, qqq, shift_signals=False)
+    if signals.empty:
+        logger.error("Signal engine returned no rows — insufficient warm-up data")
+        return None, None, None, None
 
-    # Volatility
-    if "High" in qqq.columns and "Low" in qqq.columns:
-        qqq_atr = compute_atr(qqq["High"], qqq["Low"], qqq_close)
-        volatility = qqq_atr / qqq_close
-    else:
-        volatility = qqq_close.pct_change().rolling(14).std()
-
-    vol_median = volatility.expanding().median()
-    high_vol = volatility > vol_median * 1.5
-
-    # RSI on TQQQ
-    rsi = compute_rsi(tqqq["Close"])
-
-    # --- Regime (latest value) ---
-    latest = len(qqq_close) - 1
-    uptrend = qqq_close.iloc[latest] > qqq_ema_trend.iloc[latest]
-    above_short = qqq_close.iloc[latest] > qqq_ema_short.iloc[latest]
-    mom = qqq_momentum.iloc[latest]
-    hv = high_vol.iloc[latest]
-    current_rsi = rsi.iloc[latest]
-
-    bull = uptrend or (above_short and mom > 0)
-    bear = (not uptrend) and (not above_short) and (mom < 0)
-    crisis = bear and hv
-
-    if crisis:
-        regime = "crisis"
-    elif bear:
-        regime = "bear"
-    elif bull:
-        regime = "bull"
-    else:
-        regime = "neutral"
-
-    # Drawdown detection
-    qqq_20d_high = qqq_close.rolling(20).max().iloc[latest]
-    qqq_drawdown = (qqq_close.iloc[latest] - qqq_20d_high) / qqq_20d_high
-    rapid_decline = qqq_drawdown < -0.08
-
-    # --- Base Allocation ---
-    if regime == "bull":
-        tqqq_alloc, sqqq_alloc = 1.0, 0.0
-    elif regime == "neutral":
-        tqqq_alloc, sqqq_alloc = 0.70, 0.0
-    elif regime == "bear":
-        tqqq_alloc, sqqq_alloc = 0.0, 0.0
-    elif regime == "crisis":
-        tqqq_alloc, sqqq_alloc = 0.0, 0.20
-    else:
-        tqqq_alloc, sqqq_alloc = 0.70, 0.0
-
-    # Rapid decline override
-    if rapid_decline and regime != "crisis":
-        tqqq_alloc, sqqq_alloc = 0.0, 0.15
-
-    # Tactical adjustments
-    if regime == "bull" and current_rsi < config.RSI_OVERSOLD:
-        tqqq_alloc, sqqq_alloc = 1.0, 0.0
-    elif regime == "bull" and current_rsi > 80:
-        tqqq_alloc, sqqq_alloc = 0.60, 0.25
-    elif regime == "bull" and current_rsi > config.RSI_OVERBOUGHT:
-        tqqq_alloc, sqqq_alloc = 0.75, 0.15
-    elif regime == "bear" and current_rsi > 55:
-        tqqq_alloc, sqqq_alloc = 0.20, 0.20
-
-    if regime == "neutral" and hv:
-        tqqq_alloc, sqqq_alloc = 0.30, 0.20
-
-    # Clamp
-    tqqq_alloc = max(0.0, min(1.0, tqqq_alloc))
-    sqqq_alloc = max(0.0, min(0.80, sqqq_alloc))
-    total = tqqq_alloc + sqqq_alloc
-    if total > 1.0:
-        tqqq_alloc /= total
-        sqqq_alloc /= total
+    latest = signals.iloc[-1]
+    regime = latest["regime"]
+    tqqq_alloc = float(latest["tqqq_alloc"])
+    sqqq_alloc = float(latest["sqqq_alloc"])
+    current_rsi = float(latest["rsi"])
 
     return regime, tqqq_alloc, sqqq_alloc, current_rsi
 

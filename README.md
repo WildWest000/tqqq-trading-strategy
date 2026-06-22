@@ -4,11 +4,11 @@
 
 We trade TQQQ and SQQQ using a regime-detection engine that reads the market's mood — bull, neutral, bear, or crisis — based on QQQ's trend, momentum, and volatility.
 
-In bull markets, we go 100% TQQQ to ride the wave. When conditions deteriorate, we move to cash — not SQQQ, because inverse ETFs decay over time. We only deploy SQQQ as a short-term hedge during sharp crashes.
+In bull markets, we scale up to 100% TQQQ to ride the wave. When momentum turns or volatility spikes, we scale down toward cash — not SQQQ, because inverse ETFs decay over time. (The default `mom_vol` engine is purely TQQQ↔cash; an optional `rules` engine can deploy a small SQQQ hedge during sharp crashes — see Strategy Overview.)
 
 A portfolio-level trailing stop kicks us to cash if we drop 25% from peak, and we don't re-enter until the trend confirms bullish again.
 
-**The results over 5+ years (2020–2026):** 583% return vs 502% buy-and-hold, with a max drawdown of -56% compared to -82%. Better returns, with nearly half the pain. Sharpe ratio of 0.78 vs 0.70.
+**The results over 6+ years (Jan 2020 – Jun 2026):** ~917% return vs ~661% buy-and-hold, with a max drawdown of -42% compared to -82%. Better returns, with roughly half the pain. Sharpe ratio of 0.93 vs 0.74.
 
 **The edge:** We capture almost all the upside in bull markets while sitting safely in cash during the worst drops — COVID crash, 2022 bear market, 2025 tariff selloff. It's not about timing the market perfectly — it's about not being in the market when it's falling off a cliff.
 
@@ -16,7 +16,13 @@ A portfolio-level trailing stop kicks us to cash if we drop 25% from peak, and w
 
 ## Strategy Overview
 
-### Regime Detection (via QQQ)
+> **Regime engines.** The default engine is **`mom_vol`** (`config.REGIME_METHOD`), which
+> sizes a single TQQQ↔cash position from QQQ momentum (bull/bear gate) and volatility
+> scaling — it never holds SQQQ. The tables below describe the alternative **`rules`**
+> engine (bull/neutral/bear/crisis with SQQQ hedging). Both share the same trailing-stop
+> and execution logic; the headline results above use `mom_vol`.
+
+### Regime Detection (via QQQ) — `rules` engine
 
 | Regime | Condition | TQQQ Allocation | SQQQ Allocation | Cash |
 |--------|-----------|-----------------|-----------------|------|
@@ -55,32 +61,35 @@ A portfolio-level trailing stop kicks us to cash if we drop 25% from peak, and w
 
 ## Backtest Results
 
-### Full Period (Jan 2020 – May 2026)
+Default engine (`mom_vol`), $10K starting capital.
+
+### Full Period (Jan 2020 – Jun 2026)
 
 | Metric | Strategy | Buy & Hold TQQQ |
 |--------|----------|-----------------|
-| Total Return | **+583%** | +502% |
-| Annualized Return | **+36%** | +33% |
-| Max Drawdown | **-56%** | -82% |
-| Sharpe Ratio | **0.78** | 0.70 |
-| Final Value ($10K) | **$68,283** | $60,209 |
-| Trades | 275 | 1 |
+| Total Return | **+917%** | +661% |
+| Annualized Return | **+43%** | +37% |
+| Max Drawdown | **-42%** | -82% |
+| Sharpe Ratio | **0.93** | 0.74 |
+| Final Value ($10K) | **$101,662** | $76,142 |
+| Trades | 177 | 1 |
+| Days in SQQQ | 0 | — |
 
-### Per-Regime Breakdown
+### Per-Regime Breakdown (`mom_vol`)
 
-| Regime | Days | Win Rate | Annualized |
-|--------|------|----------|------------|
-| Bull | 1,160 | 56% | +61% |
-| Neutral | 52 | 37% | -14% |
-| Bear | 245 | 18% | -19% |
-| Crisis | 114 | 18% | -15% |
+The `mom_vol` engine classifies each day as bull or bear (no neutral/crisis states):
+
+| Regime | Days | Win Rate | Annualized (approx) |
+|--------|------|----------|---------------------|
+| Bull | 1,083 | 54% | +81% |
+| Bear | 542 | 39% | +19% |
 
 ### Recent Downturn (Jan–May 2025)
 
 | Metric | Strategy | Buy & Hold |
 |--------|----------|------------|
-| Return | **-4%** | -28% |
-| Max Drawdown | **-25%** | -57% |
+| Return | **+12%** | -11% |
+| Max Drawdown | **-19%** | -57% |
 
 ### 4h Intraday Experiment (Jun 2023 – May 2026)
 

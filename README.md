@@ -137,21 +137,30 @@ TradingStrategy1/
 │   ├── README.md        # Deployment instructions
 │   ├── .env             # API keys (not committed)
 │   ├── state.json       # Persistent trailing stop state
-│   └── logs/            # Daily trade logs
+│   └── logs/            # Monthly trade logs (trade_YYYYMM.log)
+├── paper_trade_reader.py # Reads bot state/logs for the dashboard tabs
 └── README.md            # This file
 ```
 
 ## Dashboard
 
-Runs at `http://127.0.0.1:8050` with:
+Runs at `http://127.0.0.1:8050` (or `0.0.0.0:8050` when deployed). Organized into three tabs:
 
-- **Equity curve** — strategy vs buy-and-hold, with regime shading (green/yellow/red)
-- **Signals chart** — TQQQ price with buy/sell/trailing-stop markers, RSI, allocation breakdown
+**1. Backtesting**
+- **Equity curve** — strategy vs buy-and-hold, with regime shading (green/yellow/red) and
+  **buy / sell / rebalance markers overlaid directly on the curve** (green ▲ buy,
+  red ▼ sell/rebalance, yellow ✕ trailing-stop exit; hover shows the exact signal)
+- **Signals chart** — TQQQ price with buy/sell markers, RSI, allocation breakdown
 - **Drawdown chart** — strategy vs benchmark
-- **Metrics table** — return, Sharpe, drawdown, trade counts by type
+- **Metrics (KPI cards)** — return, Sharpe, drawdown, alpha vs B&H, trade counts, win rate
 - **Trade log** — every trade with execution price, allocation changes, cash, gain/loss
-- **Forward test panel** — paper trading results
-- **Date picker** — select any period (auto-downloads missing data)
+- **Date picker** — select any period (auto-downloads missing data); a
+  "Data current → YYYY-MM-DD" indicator and 6-hour auto-refresh keep the cache fresh
+
+**2. Trading Confirmations** — live Alpaca paper-bot status and order confirmations,
+read from `paper_trade/state.json` and `paper_trade/logs/trade_*.log`.
+
+**3. Logs** — browse the bot's monthly trade logs directly in the UI.
 
 ## Configuration
 
@@ -195,13 +204,43 @@ The backtest data is kept current with the latest market day in two ways:
    0 22 * * 1-5 cd ~/tqqq-trading-strategy && source ~/trading-venv/bin/activate && python3 main.py update >> ~/logs/data_update.log 2>&1
    ```
 
-## Alpaca Paper Trading
+## Alpaca Paper / Live Trading
 
 Deploy on Oracle Cloud for automated daily trading. See `paper_trade/README.md`.
 
 ```bash
 cd paper_trade
 bash cron_setup.sh   # Sets up cron for 3:30 PM EST daily
+```
+
+The bot uses the **same signal engine as the backtest** (`indicators.generate_signals`,
+honoring `config.REGIME_METHOD`), so live decisions match the dashboard. It computes
+signals unshifted (it runs near the close and acts on the latest bar).
+
+**Paper vs live** is controlled by environment variables (defaults to paper for safety):
+
+```bash
+export ALPACA_API_KEY="..."      # paper and live use DIFFERENT keys
+export ALPACA_SECRET_KEY="..."
+export ALPACA_PAPER="true"       # "false"/"0"/"live" → real-money trading
+# (advanced) export ALPACA_BASE_URL="https://api.alpaca.markets"
+```
+
+**Preview without trading** — print the current signal and intended orders, no orders placed:
+
+```bash
+python3 paper_trade/alpaca_bot.py --dry-run
+```
+
+> **Cron note:** the bot's cron line uses `source`, which is a bash builtin. Cron defaults
+> to `/bin/sh` (dash), so the crontab must set `SHELL=/bin/bash` or the job fails silently.
+
+**Dashboard as a systemd service** (recommended on the server) — auto-starts on boot and
+restarts on crash. Manage it with `systemctl`, never `kill`/`pkill`:
+
+```bash
+sudo systemctl restart trading-dashboard   # after a git pull
+journalctl -u trading-dashboard -f         # live logs
 ```
 
 ## Key Design Decisions

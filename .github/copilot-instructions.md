@@ -42,7 +42,10 @@ download_data.py → indicators.py → strategy.py → backtest.py
 
 **Key separation:** Regime detection uses QQQ (non-leveraged, cleaner signal), but trades execute on TQQQ/SQQQ (3× leveraged).
 
-**Signal timing:** Signals are computed from day N's close but shifted forward 1 day — execution happens at day N+1's open price. This eliminates look-ahead bias.
+**Signal timing:** Signals are computed from day N's close. For backtests they are shifted
+forward 1 day (execution at day N+1's open) to eliminate look-ahead bias. The live bot runs
+near the close and calls `generate_signals(..., shift_signals=False)`, acting on the latest
+bar's own close.
 
 ## Conventions
 
@@ -52,4 +55,8 @@ download_data.py → indicators.py → strategy.py → backtest.py
 - Rebalancing only triggers when allocation drift exceeds `REBALANCE_THRESHOLD` (10%).
 - The trailing stop (25% drawdown from peak) overrides all allocation signals and forces 100% cash with a 5-day cooldown before re-entry.
 - Forward test and paper trading bot persist state as JSON files — never lose state between runs.
-- `paper_trade/alpaca_bot.py` is a standalone cron-scheduled bot deployed on Oracle Cloud; it reuses the same indicator/strategy logic via imports.
+- `paper_trade/alpaca_bot.py` is a standalone cron-scheduled bot deployed on Oracle Cloud; it reuses the **same** `indicators.generate_signals` as the backtest (honoring `config.REGIME_METHOD`), so live and backtest decisions match.
+- Paper vs live is set by env vars (`ALPACA_PAPER`, default paper; or `ALPACA_BASE_URL`); `--dry-run` previews without trading.
+- The bot writes one log file per month: `paper_trade/logs/trade_YYYYMM.log`.
+- On the server the dashboard runs as `trading-dashboard.service` (systemd); restart with `sudo systemctl restart trading-dashboard`, never `kill`/`pkill`.
+- Cron must set `SHELL=/bin/bash` (the bot/data-update lines use the bash builtin `source`).

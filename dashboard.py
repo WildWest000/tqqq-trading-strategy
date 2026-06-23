@@ -185,13 +185,23 @@ def _logs_tab():
 
 # --- Layout ---
 
+# Build the header subtitle dynamically so it reflects whatever risk controls
+# are active (overlays default OFF → reads "Method | Trailing Stop").
+_subtitle_parts = [f"Method: {config.REGIME_METHOD}", "Trailing Stop: 25%"]
+if getattr(config, "VOL_TARGET_ENABLED", False):
+    _subtitle_parts.append(f"VolTgt: {config.VOL_TARGET_ANNUAL:.0%}")
+if getattr(config, "MAX_TQQQ_ALLOC", 1.0) < 1.0:
+    _subtitle_parts.append(f"Cap: {config.MAX_TQQQ_ALLOC:.0%}")
+if getattr(config, "REENTRY_COOLDOWN_DAYS", 0):
+    _subtitle_parts.append(f"Cooldown: {config.REENTRY_COOLDOWN_DAYS}d")
+HEADER_SUBTITLE = " | ".join(_subtitle_parts)
+
 app.layout = dbc.Container([
     # Header row: title + controls inline
     dbc.Row([
         dbc.Col([
             html.H4("TQQQ/SQQQ Strategy", className="mb-0 text-light"),
-            html.Small(f"Method: {config.REGIME_METHOD} | Trailing Stop: 25%",
-                      className="text-muted"),
+            html.Small(HEADER_SUBTITLE, className="text-muted"),
         ], width=4),
         dbc.Col([
             dbc.InputGroup([

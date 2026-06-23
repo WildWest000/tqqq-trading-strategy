@@ -3,9 +3,11 @@ Read and parse Alpaca paper-trading bot artifacts for the dashboard.
 
 The live bot (paper_trade/alpaca_bot.py) persists:
 - paper_trade/state.json: trailing-stop state {portfolio_peak, in_cash_mode,
-  cash_mode_days, last_regime, last_run}
+  cash_mode_days, last_regime, last_run} plus a "portfolio" snapshot
+  {equity, cash, tqqq_shares/value, sqqq_shares/value, day_pl, day_pl_pct, as_of}.
 - paper_trade/logs/trade_YYYYMM.log: human-readable monthly logs whose lines
-  follow the format "%(asctime)s [%(levelname)s] %(message)s".
+  follow the format "%(asctime)s [%(levelname)s] %(message)s". Order lines carry
+  the submit (reference) price and, once filled, the average fill price.
 
 This module loads that state and extracts structured order confirmations and
 key events from the logs so the dashboard can surface them without re-running
@@ -25,10 +27,17 @@ _LOG_LINE_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[.,]?\d* \[(?P<level>\w+)\] (?P<msg>.*)$"
 )
 
-# Order line, e.g. "Submitting: BUY 5 TQQQ" or "✓ Order submitted: buy 5 TQQQ"
+# Order line, e.g. "Submitting: BUY 5 TQQQ @ ~$73.05 (ref)" or
+# "✓ Order filled: BUY 5 TQQQ @ $73.21 (submitted @ $73.05, slippage +0.22%)"
 _ORDER_RE = re.compile(
     r"(?P<side>buy|sell)\s+(?P<qty>\d+)\s+(?P<symbol>[A-Z]{2,5})", re.IGNORECASE
 )
+
+# Prices embedded in order lines. The first "@ $X" is the primary price for the
+# line (ref price on a submit line, fill price on a filled line). A trailing
+# "submitted @ $Y" gives the original reference price on a filled line.
+_PRICE_RE = re.compile(r"@\s*~?\$(?P<price>[\d,]+\.?\d*)")
+_SUBMITTED_PRICE_RE = re.compile(r"submitted @\s*\$(?P<price>[\d,]+\.?\d*)")
 
 
 def load_bot_state() -> dict | None:
@@ -96,12 +105,30 @@ def _classify(msg: str) -> tuple[str, dict]:
             "qty": int(order.group("qty")),
             "symbol": order.group("symbol").upper(),
         }
-    if "order submitted" in low or "✓" in msg and "order" in low:
+
+    def _to_float(s):
+        return float(s.replace(",", ""))
+
+    if "order filled" in low:
+        # "@ $fill ... (submitted @ $ref ...)"
+        prices = _PRICE_RE.findall(msg)
+        if prices:
+            extra["fill_price"] = _to_float(prices[0])
+        sub = _SUBMITTED_PRICE_RE.search(msg)
+        if sub:
+            extra["submit_price"] = _to_float(sub.group("price"))
         return "order_filled", extra
     if "order failed" in low or "✗" in msg:
         return "order_failed", extra
-    if low.startswith("submitting"):
+    if low.startswith("submitting") or "order submitted" in low:
+        # Reference / submit-time price (the first "@ $X" on the line).
+        p = _PRICE_RE.search(msg)
+        if p:
+            extra["submit_price"] = _to_float(p.group("price"))
         return "order_submitted", extra
+    if "protective" in low and "stop" in low:
+        # Intraday protective stop placement / status (not a drawdown trigger).
+        return "protective_stop", extra
     if "trailing stop" in low:
         return "trailing_stop", extra
     if "rebalance complete" in low:
@@ -116,7 +143,7 @@ def _classify(msg: str) -> tuple[str, dict]:
 # Event categories surfaced as "trading confirmations".
 CONFIRMATION_TYPES = {
     "order_submitted", "order_filled", "order_failed",
-    "trailing_stop", "rebalance", "no_action", "cash_mode",
+    "trailing_stop", "protective_stop", "rebalance", "no_action", "cash_mode",
 }
 
 

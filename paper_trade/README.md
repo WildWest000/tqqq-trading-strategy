@@ -9,9 +9,9 @@ on Alpaca's paper trading platform.
 2. Downloads latest market data from yfinance
 3. Computes regime (bull/neutral/bear/crisis) and target allocation
 4. Applies trailing stop logic (25% drawdown → go to cash)
-5. Cancels any stale protective stop, then submits market orders to rebalance (whole shares only)
+5. Cancels any stale protective stop, then submits market orders to rebalance (whole shares only), logging the **submit (reference) price** and polling each order for its **average fill price**
 6. Arms an **intraday protective stop** on the TQQQ position (trailing, default 8%) so a fast crash is cut within the day
-7. Logs every decision and trade to `logs/`
+7. Persists a **portfolio snapshot** (equity, cash, positions, P&L since last run) to `state.json` and logs every decision and trade to `logs/`
 
 ## Quick Start
 
@@ -79,8 +79,8 @@ cat state.json
 | `alpaca_bot.py` | Main bot — computes signals (shared `generate_signals`), executes trades |
 | `cron_setup.sh` | One-command cron + dependency setup |
 | `.env` | API keys (created by setup, not committed) |
-| `state.json` | Persistent state (trailing stop peak, cash mode) |
-| `logs/` | Monthly trade logs (`trade_YYYYMM.log`) |
+| `state.json` | Persistent state (trailing stop peak, cash mode, portfolio snapshot) |
+| `logs/` | Monthly trade logs (`trade_YYYYMM.log`) with submit & fill prices |
 
 ## Cron Schedule
 

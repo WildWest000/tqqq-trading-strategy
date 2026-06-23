@@ -190,8 +190,14 @@ Runs at `http://127.0.0.1:8050` (or `0.0.0.0:8050` when deployed). Organized int
 - **Date picker** — select any period (auto-downloads missing data); a
   "Data current → YYYY-MM-DD" indicator and 6-hour auto-refresh keep the cache fresh
 
-**2. Trading Confirmations** — live Alpaca paper-bot status and order confirmations,
-read from `paper_trade/state.json` and `paper_trade/logs/trade_*.log`.
+- **3-week KPIs** — rolling 15-day worst-window and win-rate for short-horizon visibility
+
+**2. Trading Confirmations** — live Alpaca paper-bot status, read from
+`paper_trade/state.json` and `paper_trade/logs/trade_*.log`:
+- **Portfolio summary** at the top — equity, cash, TQQQ/SQQQ positions, and P&L since the last run
+- **Bot status** — last run, regime, trailing-stop state, portfolio peak
+- **Order confirmations table** — each order with its **submitted (reference) price**,
+  **average fill price**, and **slippage**
 
 **3. Logs** — browse the bot's monthly trade logs directly in the UI.
 

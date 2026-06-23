@@ -277,6 +277,29 @@ def compute_regime_and_allocation():
     return regime, tqqq_alloc, sqqq_alloc, current_rsi
 
 
+def _await_fill(api, order_id, timeout=20, poll=1.5):
+    """
+    Poll an order until it fills, returning the average fill price (float) or
+    None if it hasn't filled within `timeout` seconds. Market orders during
+    market hours fill almost immediately; this just confirms the actual price.
+    """
+    waited = 0.0
+    while waited <= timeout:
+        try:
+            o = api.get_order(order_id)
+        except Exception as e:
+            logger.warning(f"Could not poll order {order_id}: {e}")
+            return None
+        status = getattr(o, "status", "")
+        if status == "filled" and getattr(o, "filled_avg_price", None):
+            return float(o.filled_avg_price)
+        if status in ("canceled", "expired", "rejected"):
+            return None
+        time.sleep(poll)
+        waited += poll
+    return None
+
+
 def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc, dry_run=False):
     """
     Rebalance portfolio to target allocations using market orders.
@@ -333,24 +356,37 @@ def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc, dry_run=False):
     elif sqqq_delta > 0:
         orders.append(("SQQQ", "buy", sqqq_delta))
 
+    # Reference (submit-time) prices, keyed by symbol, for slippage reporting.
+    ref_prices = {"TQQQ": tqqq_price, "SQQQ": sqqq_price}
+
     for symbol, side, qty in orders:
         if qty == 0:
             continue
+        ref_price = ref_prices.get(symbol, 0.0)
         if dry_run:
-            logger.info(f"[DRY-RUN] Would submit: {side.upper()} {qty} {symbol} (no order placed)")
+            logger.info(f"[DRY-RUN] Would submit: {side.upper()} {qty} {symbol} "
+                        f"@ ~${ref_price:.2f} (no order placed)")
             continue
-        logger.info(f"Submitting: {side.upper()} {qty} {symbol}")
+        logger.info(f"Submitting: {side.upper()} {qty} {symbol} @ ~${ref_price:.2f} (ref)")
         try:
-            api.submit_order(
+            order = api.submit_order(
                 symbol=symbol,
                 qty=qty,
                 side=side,
                 type="market",
                 time_in_force="day"
             )
-            logger.info(f"  ✓ Order submitted: {side} {qty} {symbol}")
+            fill_price = _await_fill(api, order.id)
+            if fill_price:
+                slip = ((fill_price - ref_price) / ref_price * 100) if ref_price else 0.0
+                logger.info(f"  ✓ Order filled: {side.upper()} {qty} {symbol} "
+                            f"@ ${fill_price:.2f} (submitted @ ${ref_price:.2f}, "
+                            f"slippage {slip:+.2f}%)")
+            else:
+                logger.info(f"  ✓ Order submitted: {side.upper()} {qty} {symbol} "
+                            f"@ ~${ref_price:.2f} (fill pending)")
         except Exception as e:
-            logger.error(f"  ✗ Order failed: {e}")
+            logger.error(f"  ✗ Order failed: {side.upper()} {qty} {symbol}: {e}")
 
     return True
 
@@ -431,6 +467,24 @@ def run(dry_run=False):
 
     # Update state (skipped in dry-run — preview only)
     if not dry_run:
+        # Persist a portfolio snapshot so the dashboard can show a live summary
+        # (equity, cash, positions) without needing Alpaca credentials itself.
+        post_equity, post_cash = get_account_value(api)
+        tqqq_sh, sqqq_sh, tqqq_val, sqqq_val = get_current_positions(api)
+        prev = state.get("portfolio") or {}
+        prev_equity = prev.get("equity") or post_equity
+        state["portfolio"] = {
+            "equity": post_equity,
+            "cash": post_cash,
+            "tqqq_shares": tqqq_sh,
+            "tqqq_value": tqqq_val,
+            "sqqq_shares": sqqq_sh,
+            "sqqq_value": sqqq_val,
+            "prev_equity": prev_equity,
+            "day_pl": post_equity - prev_equity,
+            "day_pl_pct": ((post_equity - prev_equity) / prev_equity * 100) if prev_equity else 0.0,
+            "as_of": datetime.now().isoformat(),
+        }
         state["last_regime"] = regime
         state["last_run"] = datetime.now().isoformat()
         save_state(state)

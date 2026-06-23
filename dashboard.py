@@ -146,7 +146,12 @@ def _confirmations_tab():
                 width=3),
         ], className="align-items-center mb-2 pt-2"),
 
+        # Portfolio summary (live equity / cash / positions / day P&L)
+        html.H6("Portfolio Summary", className="text-light mt-1 mb-2"),
+        dbc.Row(id="portfolio-summary", className="mb-3 g-2"),
+
         # Bot status KPI cards
+        html.H6("Bot Status", className="text-light mb-2"),
         dbc.Row(id="bot-status-cards", className="mb-3 g-2"),
 
         # Confirmations table
@@ -638,7 +643,8 @@ def auto_refresh_data(n_intervals):
 # --- Trading Confirmations Tab Callbacks ---
 
 @app.callback(
-    [Output("bot-status-cards", "children"),
+    [Output("portfolio-summary", "children"),
+     Output("bot-status-cards", "children"),
      Output("confirmations-table", "children")],
     [Input("confirm-refresh-btn", "n_clicks"),
      Input("main-tabs", "active_tab")],
@@ -648,7 +654,9 @@ def refresh_confirmations(n_clicks, active_tab):
     """Load Alpaca bot state + parsed order confirmations from disk."""
     state = ptr.load_bot_state()
     events = ptr.parse_confirmations()
-    return _build_bot_status_cards(state), _build_confirmations_table(events)
+    return (_build_portfolio_summary(state),
+            _build_bot_status_cards(state),
+            _build_confirmations_table(events))
 
 
 # --- Logs Tab Callbacks ---
@@ -696,6 +704,44 @@ def display_log(path, n_clicks):
 
 # --- Helper Functions ---
 
+def _build_portfolio_summary(state):
+    """Live portfolio summary cards from the bot's persisted snapshot."""
+    snap = (state or {}).get("portfolio")
+    if not snap:
+        return [dbc.Col(kpi_card(
+            "Portfolio", "No data",
+            "Snapshot appears after the bot's next run", "secondary"
+        ), width=12)]
+
+    equity = snap.get("equity", 0) or 0
+    cash = snap.get("cash", 0) or 0
+    tqqq_sh = snap.get("tqqq_shares", 0) or 0
+    tqqq_val = snap.get("tqqq_value", 0) or 0
+    sqqq_sh = snap.get("sqqq_shares", 0) or 0
+    sqqq_val = snap.get("sqqq_value", 0) or 0
+    day_pl = snap.get("day_pl", 0) or 0
+    day_pl_pct = snap.get("day_pl_pct", 0) or 0
+    as_of = snap.get("as_of", "")
+    if isinstance(as_of, str) and "T" in as_of:
+        as_of = as_of.replace("T", " ")[:19]
+
+    tqqq_pct = (tqqq_val / equity * 100) if equity else 0
+    sqqq_pct = (sqqq_val / equity * 100) if equity else 0
+    cash_pct = (cash / equity * 100) if equity else 0
+    pl_color = "success" if day_pl >= 0 else "danger"
+
+    return [
+        dbc.Col(kpi_card("Equity", f"${equity:,.0f}", f"as of {as_of}"), width=3),
+        dbc.Col(kpi_card("Since Last Run", f"{day_pl:+,.0f}",
+                         f"{day_pl_pct:+.2f}%", pl_color), width=3),
+        dbc.Col(kpi_card("Cash", f"${cash:,.0f}", f"{cash_pct:.0f}% of equity"), width=2),
+        dbc.Col(kpi_card("TQQQ", f"{tqqq_sh:,} sh",
+                         f"${tqqq_val:,.0f} · {tqqq_pct:.0f}%"), width=2),
+        dbc.Col(kpi_card("SQQQ", f"{sqqq_sh:,} sh",
+                         f"${sqqq_val:,.0f} · {sqqq_pct:.0f}%"), width=2),
+    ]
+
+
 def _build_bot_status_cards(state):
     """KPI cards summarizing the live bot's persisted state.json."""
     if not state:
@@ -731,6 +777,7 @@ _CONFIRM_BADGE = {
     "order_filled": ("FILLED", "success"),
     "order_failed": ("FAILED", "danger"),
     "trailing_stop": ("TRAILING STOP", "danger"),
+    "protective_stop": ("PROTECTIVE STOP", "warning"),
     "rebalance": ("REBALANCED", "primary"),
     "no_action": ("NO ACTION", "secondary"),
     "cash_mode": ("CASH MODE", "warning"),
@@ -752,16 +799,30 @@ def _build_confirmations_table(events):
             detail = f"{ev['side'].upper()} {ev['qty']} {ev['symbol']}"
         else:
             detail = ev["message"][:80]
+        submit_px = f"${ev['submit_price']:,.2f}" if ev.get("submit_price") else "—"
+        fill_px = f"${ev['fill_price']:,.2f}" if ev.get("fill_price") else "—"
+        # Slippage badge when both prices are known.
+        slip_cell = "—"
+        if ev.get("submit_price") and ev.get("fill_price"):
+            slip = (ev["fill_price"] - ev["submit_price"]) / ev["submit_price"] * 100
+            slip_color = "danger" if abs(slip) > 0.5 else "secondary"
+            slip_cell = dbc.Badge(f"{slip:+.2f}%", color=slip_color, className="small")
         rows.append(html.Tr([
             html.Td(ev["timestamp"], className="small text-nowrap"),
             html.Td(dbc.Badge(label, color=color, className="small")),
             html.Td(detail, className="small"),
+            html.Td(submit_px, className="small text-nowrap text-end"),
+            html.Td(fill_px, className="small text-nowrap text-end"),
+            html.Td(slip_cell, className="small text-nowrap text-end"),
         ]))
 
     header = html.Thead(html.Tr([
         html.Th("Time", className="small"),
         html.Th("Event", className="small"),
         html.Th("Detail", className="small"),
+        html.Th("Submitted", className="small text-end"),
+        html.Th("Filled", className="small text-end"),
+        html.Th("Slippage", className="small text-end"),
     ]))
     return dbc.Table([header, html.Tbody(rows)],
                      bordered=True, hover=True, color="dark", size="sm", striped=True)

@@ -60,5 +60,6 @@ bar's own close.
 - The bot writes one log file per month: `paper_trade/logs/trade_YYYYMM.log`.
 - `mom_vol` short-horizon overlays (`indicators.apply_short_horizon_overlays`: vol-targeting, exposure cap, re-entry cooldown) are causal (applied pre-shift) and **default OFF** — backtests show they trim long-run return without improving Sharpe.
 - The live bot arms a broker-side intraday trailing stop on TQQQ after buys (`INTRADAY_STOP_*`); it's re-armed each run and is the only mechanism that reacts to single-day crashes (not backtestable in the daily engine).
+- Bot order logs carry submit (reference) and average fill prices; `state.json` also holds a `portfolio` snapshot (equity/cash/positions/day P&L) that the dashboard's Confirmations tab renders as a portfolio summary + price/slippage columns.
 - On the server the dashboard runs as `trading-dashboard.service` (systemd); restart with `sudo systemctl restart trading-dashboard`, never `kill`/`pkill`.
 - Cron must set `SHELL=/bin/bash` (the bot/data-update lines use the bash builtin `source`).

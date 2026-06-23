@@ -29,6 +29,7 @@ ALPACA_API_KEY/ALPACA_SECRET_KEY with your live keys as well as ALPACA_PAPER.
 import os
 import sys
 import json
+import time
 import logging
 from datetime import datetime, timedelta
 
@@ -168,7 +169,7 @@ def cancel_open_tqqq_orders(api, dry_run=False):
             logger.warning(f"Could not cancel order {o.id}: {e}")
 
 
-def manage_protective_stop(api, dry_run=False):
+def manage_protective_stop(api, dry_run=False, expect_position=False):
     """
     Place a fresh intraday protective stop on the current TQQQ position so a
     fast intraday crash is cut WITHOUT waiting for the next daily run.
@@ -176,11 +177,25 @@ def manage_protective_stop(api, dry_run=False):
     Uses a trailing stop (trails the high) or a fixed stop depending on config.
     This is the only mechanism that reacts within a single trading day — the
     daily backtest cannot model it, so it lives only in the live bot.
+
+    When expect_position is True (a buy was just submitted), briefly polls for
+    the market order to fill so the stop is armed the SAME day as the entry
+    rather than on the next run.
     """
     if not getattr(config, "INTRADAY_STOP_ENABLED", False):
         return
 
     tqqq_shares, _, _, _ = get_current_positions(api)
+
+    # A market buy may not have settled yet — give it a moment so the entry day
+    # isn't left unprotected. Skip the wait in dry-run (no real fill).
+    if expect_position and tqqq_shares <= 0 and not dry_run:
+        for _ in range(6):
+            time.sleep(2)
+            tqqq_shares, _, _, _ = get_current_positions(api)
+            if tqqq_shares > 0:
+                break
+
     if tqqq_shares <= 0:
         logger.info("No TQQQ position — no protective stop placed")
         return
@@ -412,7 +427,7 @@ def run(dry_run=False):
     traded = execute_rebalance(api, tqqq_alloc, sqqq_alloc, dry_run=dry_run)
 
     # Re-arm the intraday protective stop on the resulting TQQQ position.
-    manage_protective_stop(api, dry_run=dry_run)
+    manage_protective_stop(api, dry_run=dry_run, expect_position=(tqqq_alloc > 0))
 
     # Update state (skipped in dry-run — preview only)
     if not dry_run:

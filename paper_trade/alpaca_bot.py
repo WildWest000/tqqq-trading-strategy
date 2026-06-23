@@ -144,6 +144,82 @@ def get_account_value(api):
     return float(account.equity), float(account.cash)
 
 
+def cancel_open_tqqq_orders(api, dry_run=False):
+    """
+    Cancel any resting TQQQ orders (e.g. a prior protective stop) before
+    rebalancing, so they don't tie up share quantity or conflict with new
+    market orders. Safe no-op if there are none.
+    """
+    try:
+        open_orders = api.list_orders(status="open")
+    except Exception as e:
+        logger.warning(f"Could not list open orders: {e}")
+        return
+    for o in open_orders:
+        if o.symbol != "TQQQ":
+            continue
+        if dry_run:
+            logger.info(f"[DRY-RUN] Would cancel open {o.type} {o.side} order {o.id} for TQQQ")
+            continue
+        try:
+            api.cancel_order(o.id)
+            logger.info(f"Cancelled stale {o.type} {o.side} order for TQQQ")
+        except Exception as e:
+            logger.warning(f"Could not cancel order {o.id}: {e}")
+
+
+def manage_protective_stop(api, dry_run=False):
+    """
+    Place a fresh intraday protective stop on the current TQQQ position so a
+    fast intraday crash is cut WITHOUT waiting for the next daily run.
+
+    Uses a trailing stop (trails the high) or a fixed stop depending on config.
+    This is the only mechanism that reacts within a single trading day — the
+    daily backtest cannot model it, so it lives only in the live bot.
+    """
+    if not getattr(config, "INTRADAY_STOP_ENABLED", False):
+        return
+
+    tqqq_shares, _, _, _ = get_current_positions(api)
+    if tqqq_shares <= 0:
+        logger.info("No TQQQ position — no protective stop placed")
+        return
+
+    pct = config.INTRADAY_STOP_PCT
+    trailing = getattr(config, "INTRADAY_TRAILING_STOP", True)
+
+    if dry_run:
+        kind = f"trailing stop {pct:.0%}" if trailing else f"stop {pct:.0%} below price"
+        logger.info(f"[DRY-RUN] Would place protective {kind} SELL {tqqq_shares} TQQQ (GTC)")
+        return
+
+    try:
+        if trailing:
+            api.submit_order(
+                symbol="TQQQ",
+                qty=tqqq_shares,
+                side="sell",
+                type="trailing_stop",
+                trail_percent=str(round(pct * 100, 2)),
+                time_in_force="gtc",
+            )
+            logger.info(f"  ✓ Protective TRAILING STOP placed: SELL {tqqq_shares} TQQQ, trail {pct:.0%}")
+        else:
+            trade = api.get_latest_trade("TQQQ")
+            stop_price = round(trade.price * (1 - pct), 2)
+            api.submit_order(
+                symbol="TQQQ",
+                qty=tqqq_shares,
+                side="sell",
+                type="stop",
+                stop_price=str(stop_price),
+                time_in_force="gtc",
+            )
+            logger.info(f"  ✓ Protective STOP placed: SELL {tqqq_shares} TQQQ @ ${stop_price} ({pct:.0%} below)")
+    except Exception as e:
+        logger.error(f"  ✗ Protective stop failed: {e}")
+
+
 def compute_regime_and_allocation():
     """
     Download recent data and compute current regime + target allocation.
@@ -330,7 +406,13 @@ def run(dry_run=False):
         sqqq_alloc = 0.0
 
     # Execute rebalance
+    # Cancel any resting protective stop first so it doesn't tie up shares or
+    # conflict with the rebalance market orders.
+    cancel_open_tqqq_orders(api, dry_run=dry_run)
     traded = execute_rebalance(api, tqqq_alloc, sqqq_alloc, dry_run=dry_run)
+
+    # Re-arm the intraday protective stop on the resulting TQQQ position.
+    manage_protective_stop(api, dry_run=dry_run)
 
     # Update state (skipped in dry-run — preview only)
     if not dry_run:

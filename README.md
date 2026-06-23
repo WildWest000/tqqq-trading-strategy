@@ -49,6 +49,30 @@ A portfolio-level trailing stop kicks us to cash if we drop 25% from peak, and w
 - **Re-entry**: Only re-enter when regime returns to "bull" AND cooldown is met
 - **Peak reset**: Portfolio peak resets when exiting cash mode (prevents repeated triggers)
 - **Rebalance threshold**: Only trade when allocation drifts > 10% from target
+- **Intraday protective stop (live bot only)**: After buying TQQQ, the bot places
+  a resting trailing-stop order at the broker (default 8%) so a fast intraday
+  crash is cut *within the day* instead of waiting for the next daily run. This
+  is the only mechanism that reacts to single-day crashes; the daily backtest
+  cannot model it. Toggle via `INTRADAY_STOP_ENABLED`.
+
+#### Short-horizon overlays (opt-in, default OFF)
+
+For users who want to reduce 2–3 week tail risk, `config.py` exposes causal
+(no look-ahead) overlays on the `mom_vol` allocation. **Backtests show they trim
+long-run return without improving Sharpe**, so they ship OFF by default — enable
+only if lower short-term drawdown is worth giving up upside:
+
+| Overlay | Config | Effect (2020–2026 backtest) |
+|---------|--------|------------------------------|
+| Volatility targeting | `VOL_TARGET_ENABLED`, `VOL_TARGET_ANNUAL` | Caps exposure in high-vol regimes. `0.55` → return 917%→704%, MaxDD −42%→−37%, Sharpe ~flat |
+| Hard exposure cap | `MAX_TQQQ_ALLOC` | Lower ceiling on TQQQ. `0.70` → worst 3wk window improves, but return 917%→404% |
+| Re-entry cooldown | `REENTRY_COOLDOWN_DAYS` | Holds reduced exposure N days after a de-risk to curb whipsaw |
+
+> **Key finding:** a once-daily, close-based, next-open strategy *structurally
+> cannot dodge a single-day crash* (e.g. TQQQ −14% on 2026-06-05). Faster daily
+> indicators only add whipsaw. The realistic short-term levers are lower exposure
+> (above, at a return cost) and the **intraday broker stop** (the real crash fix).
+
 
 ### Execution Model
 
@@ -185,6 +209,13 @@ Edit `config.py`:
 | `REBALANCE_THRESHOLD` | 0.10 | Min allocation drift to trigger trade |
 | `STARTING_CAPITAL` | $10,000 | Initial capital |
 | `RISK_FREE_RATE` | 4.5% | For Sharpe ratio calculation |
+| `INTRADAY_STOP_ENABLED` | True | Live bot: place a broker stop on TQQQ after buys |
+| `INTRADAY_TRAILING_STOP` | True | True = trailing stop; False = fixed stop |
+| `INTRADAY_STOP_PCT` | 0.08 | Stop distance below entry/high (8%) |
+| `VOL_TARGET_ENABLED` | False | Opt-in volatility targeting overlay (`mom_vol`) |
+| `VOL_TARGET_ANNUAL` | 0.55 | Target annualized position volatility |
+| `MAX_TQQQ_ALLOC` | 1.0 | Hard cap on TQQQ allocation (1.0 = no cap) |
+| `REENTRY_COOLDOWN_DAYS` | 0 | Days to hold reduced exposure after a de-risk (0 = off) |
 
 ## Data Caching
 
@@ -240,6 +271,12 @@ export ALPACA_PAPER="true"       # "false"/"0"/"live" → real-money trading
 ```bash
 python3 paper_trade/alpaca_bot.py --dry-run
 ```
+
+**Intraday protective stop** — after each buy the bot arms a resting trailing-stop
+order at the broker (default 8%, `INTRADAY_STOP_PCT`) and cancels/re-arms it on
+the next run. This cuts a fast intraday crash without waiting for the next daily
+cycle. Disable with `INTRADAY_STOP_ENABLED=False`. The `--dry-run` output shows
+the stop it *would* place.
 
 > **Cron note:** the bot's cron line uses `source`, which is a bash builtin. Cron defaults
 > to `/bin/sh` (dash), so the crontab must set `SHELL=/bin/bash` or the job fails silently.

@@ -9,8 +9,9 @@ on Alpaca's paper trading platform.
 2. Downloads latest market data from yfinance
 3. Computes regime (bull/neutral/bear/crisis) and target allocation
 4. Applies trailing stop logic (25% drawdown → go to cash)
-5. Submits market orders on Alpaca to rebalance (whole shares only)
-6. Logs every decision and trade to `logs/`
+5. Cancels any stale protective stop, then submits market orders to rebalance (whole shares only)
+6. Arms an **intraday protective stop** on the TQQQ position (trailing, default 8%) so a fast crash is cut within the day
+7. Logs every decision and trade to `logs/`
 
 ## Quick Start
 
@@ -117,3 +118,6 @@ journalctl -u trading-dashboard -f          # live logs
 - 10% drift threshold before rebalancing (avoids excessive trading)
 - All decisions logged with timestamps
 - Trailing stop prevents catastrophic drawdowns
+- **Intraday protective stop** (`INTRADAY_STOP_ENABLED`, default on) places a
+  broker-side trailing stop (default 8%) on TQQQ after each buy, cutting fast
+  single-day crashes the daily loop can't react to; re-armed every run

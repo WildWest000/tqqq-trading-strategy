@@ -186,6 +186,69 @@ def _map_states_to_regimes(states: np.ndarray, features_df: pd.DataFrame, n_stat
     return mapping
 
 
+def apply_short_horizon_overlays(alloc: pd.Series, daily_vol: pd.Series) -> pd.Series:
+    """
+    Apply causal short-horizon risk overlays to a TQQQ allocation series.
+
+    All overlays use only past/current information (no look-ahead). They are
+    applied to the allocation BEFORE the 1-day forward shift in generate_signals,
+    so the result is still acted on at the next open.
+
+    Overlays (config-driven, each independently toggleable):
+      1. Volatility targeting — scale exposure so estimated annualized position
+         volatility (alloc * TQQQ_LEVERAGE * annualized QQQ vol) does not exceed
+         VOL_TARGET_ANNUAL. Only ever reduces exposure (never levers above base).
+      2. Re-entry cooldown — after a sharp de-risk (drop >= REENTRY_DERISK_DROP),
+         hold the reduced exposure for REENTRY_COOLDOWN_DAYS before rebuilding.
+      3. Hard exposure cap — clamp final allocation to MAX_TQQQ_ALLOC.
+
+    Args:
+        alloc: base TQQQ allocation series (0..1), pre-shift.
+        daily_vol: daily return volatility of QQQ aligned to alloc's index.
+
+    Returns:
+        Adjusted allocation series (same index).
+    """
+    out = alloc.copy()
+
+    # 1. Volatility targeting (cap exposure in high-vol regimes)
+    if getattr(config, "VOL_TARGET_ENABLED", False):
+        ann_vol = daily_vol * np.sqrt(252.0)  # annualized QQQ vol
+        # Estimated annualized position vol at full base allocation = lev * ann_vol.
+        est_pos_vol = (config.TQQQ_LEVERAGE * ann_vol).replace(0.0, np.nan)
+        vol_scale = (config.VOL_TARGET_ANNUAL / est_pos_vol).clip(upper=1.0)
+        vol_scale = vol_scale.fillna(1.0)  # if vol unknown, don't scale
+        out = out * vol_scale
+
+    # 2. Re-entry cooldown / whipsaw guard (iterative, causal)
+    cooldown_days = int(getattr(config, "REENTRY_COOLDOWN_DAYS", 0) or 0)
+    if cooldown_days > 0:
+        drop_thresh = config.REENTRY_DERISK_DROP
+        values = out.to_numpy(copy=True)
+        cooldown = 0
+        held_cap = 1.0
+        prev = values[0] if len(values) else 0.0
+        for i in range(1, len(values)):
+            if cooldown > 0:
+                # While cooling down, do not allow exposure above the held cap.
+                held_cap = min(held_cap, values[i]) if values[i] < held_cap else held_cap
+                values[i] = min(values[i], held_cap)
+                cooldown -= 1
+            # Detect a fresh de-risk relative to the previous (possibly capped) level.
+            if prev - values[i] >= drop_thresh:
+                cooldown = cooldown_days
+                held_cap = values[i]
+            prev = values[i]
+        out = pd.Series(values, index=out.index)
+
+    # 3. Hard exposure cap
+    max_alloc = getattr(config, "MAX_TQQQ_ALLOC", 1.0)
+    if max_alloc < 1.0:
+        out = out.clip(upper=max_alloc)
+
+    return out.clip(0.0, 1.0)
+
+
 def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, qqq_full: pd.DataFrame = None, shift_signals: bool = True) -> pd.DataFrame:
     """
     Generate allocation signals using a regime-based dual-allocation approach.
@@ -266,7 +329,11 @@ def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, 
         # RSI dip-buy: when momentum is negative but TQQQ is oversold, aggressively buy the dip
         oversold_bear = (mom <= 0) & (df["rsi"] < config.RSI_DIP_BUY_THRESHOLD)
         alloc[oversold_bear] = config.RSI_DIP_BUY_ALLOC
-        
+
+        # Short-horizon risk overlays (vol-targeting / cooldown / cap). Causal:
+        # applied pre-shift, so still acted on at the next open (no look-ahead).
+        alloc = apply_short_horizon_overlays(alloc, vol)
+
         df["tqqq_alloc"] = alloc
         df["sqqq_alloc"] = 0.0
         df["regime"] = np.where(mom > 0, "bull", "bear")

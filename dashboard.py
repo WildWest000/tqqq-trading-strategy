@@ -279,6 +279,16 @@ def run_backtest_callback(n_clicks, start_date, end_date):
     sharpe_color = "success" if sharpe > 1 else ("warning" if sharpe > 0.5 else "danger")
     dd_color = "success" if max_dd > -0.3 else ("warning" if max_dd > -0.5 else "danger")
     alpha_color = "success" if alpha > 0 else "danger"
+
+    # --- Rolling 3-week (15 trading-day) short-horizon stats ---
+    pv = portfolio_df["portfolio_value"]
+    roll_3wk = (pv / pv.shift(15) - 1).dropna()
+    if len(roll_3wk) > 0:
+        wk_worst = roll_3wk.min() * 100
+        wk_win = (roll_3wk > 0).mean() * 100
+    else:
+        wk_worst = wk_win = 0
+    wk_worst_color = "success" if wk_worst > -15 else ("warning" if wk_worst > -25 else "danger")
     
     kpis = [
         dbc.Col(kpi_card("Total Return", f"{total_ret*100:+.1f}%",
@@ -293,6 +303,10 @@ def run_backtest_callback(n_clicks, start_date, end_date):
                         f"Bull: {sm.get('bull_rebal', 0)} Def: {sm.get('defensive_rebal', 0)}"), width=2),
         dbc.Col(kpi_card("Win Rate", f"{win_rate:.0f}%",
                         f"{int(win_rate*num_trades/100)}/{num_trades} profitable"), width=2),
+        dbc.Col(kpi_card("3wk Worst", f"{wk_worst:.1f}%",
+                        "worst rolling 15-day window", wk_worst_color), width=2),
+        dbc.Col(kpi_card("3wk Win Rate", f"{wk_win:.0f}%",
+                        "rolling 15-day windows > 0"), width=2),
     ]
     
     # --- Equity Curve ---

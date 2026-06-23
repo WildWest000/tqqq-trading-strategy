@@ -58,5 +58,7 @@ bar's own close.
 - `paper_trade/alpaca_bot.py` is a standalone cron-scheduled bot deployed on Oracle Cloud; it reuses the **same** `indicators.generate_signals` as the backtest (honoring `config.REGIME_METHOD`), so live and backtest decisions match.
 - Paper vs live is set by env vars (`ALPACA_PAPER`, default paper; or `ALPACA_BASE_URL`); `--dry-run` previews without trading.
 - The bot writes one log file per month: `paper_trade/logs/trade_YYYYMM.log`.
+- `mom_vol` short-horizon overlays (`indicators.apply_short_horizon_overlays`: vol-targeting, exposure cap, re-entry cooldown) are causal (applied pre-shift) and **default OFF** — backtests show they trim long-run return without improving Sharpe.
+- The live bot arms a broker-side intraday trailing stop on TQQQ after buys (`INTRADAY_STOP_*`); it's re-armed each run and is the only mechanism that reacts to single-day crashes (not backtestable in the daily engine).
 - On the server the dashboard runs as `trading-dashboard.service` (systemd); restart with `sudo systemctl restart trading-dashboard`, never `kill`/`pkill`.
 - Cron must set `SHELL=/bin/bash` (the bot/data-update lines use the bash builtin `source`).

@@ -23,6 +23,15 @@ STOP_LOSS_PCT = 0.03
 TAKE_PROFIT_PCT = 0.10
 REBALANCE_THRESHOLD = 0.10  # Only rebalance when allocation drifts by >10%
 
+# --- Intraday Stop-Loss (live bot only) ---
+# After the bot buys TQQQ, it can place a resting stop order at the broker so a
+# fast intraday crash is cut WITHOUT waiting for the next daily run. This is the
+# only mechanism that can react within a single day (the daily backtest cannot
+# model it). Set INTRADAY_STOP_ENABLED=False to disable.
+INTRADAY_STOP_ENABLED = True
+INTRADAY_TRAILING_STOP = True   # True = trailing stop (trails the high); False = fixed stop
+INTRADAY_STOP_PCT = 0.08        # Stop distance below entry/high (e.g. 0.08 = 8%)
+
 # --- Capital ---
 STARTING_CAPITAL = 10_000
 RISK_FREE_RATE = 0.045  # Annual risk-free rate (T-bill ~4.5%)
@@ -57,6 +66,29 @@ VOL_CEILING = 2.5  # Vol ratio above this = zero allocation
 MOM_NEGATIVE_SCALE = 0.3  # Allocation multiplier when momentum is negative
 RSI_DIP_BUY_THRESHOLD = 30  # RSI below this in bear = dip-buy override
 RSI_DIP_BUY_ALLOC = 0.8  # Allocation during dip-buy override
+
+# --- Short-Horizon Risk Overlays (mom_vol path) ---
+# These act on the TQQQ allocation BEFORE the 1-day forward shift, so they are
+# causal (no look-ahead). They aim to reduce 2-3 week tail risk / whipsaw.
+# Defaults below are tuned via backtest; see README "Short-horizon overlays".
+TQQQ_LEVERAGE = 3.0  # TQQQ tracks ~3x QQQ daily; used to estimate position vol
+
+# Volatility targeting: scale exposure so annualized position vol ~= target.
+# Caps exposure in high-vol regimes (reduces crash-window pain), allows full
+# exposure in calm regimes. NOTE: backtests show this trims long-run return
+# without improving Sharpe, so it ships OFF by default (opt-in tail control).
+VOL_TARGET_ENABLED = False
+VOL_TARGET_ANNUAL = 0.55  # Target annualized portfolio volatility (TQQQ-based)
+
+# Hard exposure cap: maximum TQQQ allocation (1.0 = no cap). Lowering this
+# reduces short-term tail risk at the cost of long-run upside.
+MAX_TQQQ_ALLOC = 1.0
+
+# Re-entry cooldown (whipsaw guard): after a sharp de-risk (alloc drops by
+# REENTRY_DERISK_DROP in one step), hold the reduced exposure for N trading
+# days before rebuilding. 0 = disabled.
+REENTRY_COOLDOWN_DAYS = 0
+REENTRY_DERISK_DROP = 0.20
 
 # --- Dashboard ---
 DASHBOARD_PORT = 8050

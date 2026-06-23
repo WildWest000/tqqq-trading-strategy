@@ -22,6 +22,8 @@ Usage:
   python3 paper_trade/alpaca_bot.py            # normal run (places orders)
   python3 paper_trade/alpaca_bot.py --dry-run  # preview signal + intended
                                                # trades; no orders, no state write
+  python3 paper_trade/alpaca_bot.py --snapshot # write portfolio snapshot to
+                                               # state.json only; no orders
 
 Note: paper and live use DIFFERENT API keys. When switching to live, update
 ALPACA_API_KEY/ALPACA_SECRET_KEY with your live keys as well as ALPACA_PAPER.
@@ -143,6 +145,55 @@ def get_account_value(api):
     """Get total portfolio value (equity)."""
     account = api.get_account()
     return float(account.equity), float(account.cash)
+
+
+def update_portfolio_snapshot(api, state):
+    """
+    Read live equity/cash/positions and store a portfolio snapshot in `state`
+    (under "portfolio") so the dashboard can render a live summary from disk
+    without needing Alpaca credentials. `day_pl` is measured against the prior
+    snapshot's equity (≈ change since the last bot run). Mutates and returns state.
+    """
+    post_equity, post_cash = get_account_value(api)
+    tqqq_sh, sqqq_sh, tqqq_val, sqqq_val = get_current_positions(api)
+    prev = state.get("portfolio") or {}
+    prev_equity = prev.get("equity") or post_equity
+    state["portfolio"] = {
+        "equity": post_equity,
+        "cash": post_cash,
+        "tqqq_shares": tqqq_sh,
+        "tqqq_value": tqqq_val,
+        "sqqq_shares": sqqq_sh,
+        "sqqq_value": sqqq_val,
+        "prev_equity": prev_equity,
+        "day_pl": post_equity - prev_equity,
+        "day_pl_pct": ((post_equity - prev_equity) / prev_equity * 100) if prev_equity else 0.0,
+        "as_of": datetime.now().isoformat(),
+    }
+    return state
+
+
+def write_snapshot():
+    """
+    Backfill the portfolio snapshot immediately (no trading).
+
+    Connects to Alpaca, reads equity/cash/positions, writes the snapshot into
+    state.json, and exits. Useful to populate the dashboard's Portfolio Summary
+    right away instead of waiting for the next scheduled bot run.
+    """
+    logger.info("=" * 60)
+    logger.info("TQQQ/SQQQ Bot — SNAPSHOT (no orders)")
+    logger.info("=" * 60)
+    api = get_alpaca_api()
+    state = load_state()
+    update_portfolio_snapshot(api, state)
+    save_state(state)
+    snap = state["portfolio"]
+    logger.info(f"Equity: ${snap['equity']:,.2f} | Cash: ${snap['cash']:,.2f} | "
+                f"TQQQ: {snap['tqqq_shares']} sh (${snap['tqqq_value']:,.2f}) | "
+                f"SQQQ: {snap['sqqq_shares']} sh (${snap['sqqq_value']:,.2f})")
+    logger.info("Snapshot written to state.json ✓")
+    logger.info("=" * 60)
 
 
 def cancel_open_tqqq_orders(api, dry_run=False):
@@ -469,22 +520,7 @@ def run(dry_run=False):
     if not dry_run:
         # Persist a portfolio snapshot so the dashboard can show a live summary
         # (equity, cash, positions) without needing Alpaca credentials itself.
-        post_equity, post_cash = get_account_value(api)
-        tqqq_sh, sqqq_sh, tqqq_val, sqqq_val = get_current_positions(api)
-        prev = state.get("portfolio") or {}
-        prev_equity = prev.get("equity") or post_equity
-        state["portfolio"] = {
-            "equity": post_equity,
-            "cash": post_cash,
-            "tqqq_shares": tqqq_sh,
-            "tqqq_value": tqqq_val,
-            "sqqq_shares": sqqq_sh,
-            "sqqq_value": sqqq_val,
-            "prev_equity": prev_equity,
-            "day_pl": post_equity - prev_equity,
-            "day_pl_pct": ((post_equity - prev_equity) / prev_equity * 100) if prev_equity else 0.0,
-            "as_of": datetime.now().isoformat(),
-        }
+        update_portfolio_snapshot(api, state)
         state["last_regime"] = regime
         state["last_run"] = datetime.now().isoformat()
         save_state(state)
@@ -500,5 +536,9 @@ def run(dry_run=False):
 
 
 if __name__ == "__main__":
-    dry_run = any(a in ("--dry-run", "--dryrun", "-n") for a in sys.argv[1:])
-    run(dry_run=dry_run)
+    args = sys.argv[1:]
+    if any(a in ("--snapshot", "--snap") for a in args):
+        write_snapshot()
+    else:
+        dry_run = any(a in ("--dry-run", "--dryrun", "-n") for a in args)
+        run(dry_run=dry_run)

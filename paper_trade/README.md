@@ -42,6 +42,9 @@ source .env   # or: source ~/.trading_env
 # Preview the signal + intended trades WITHOUT placing orders (recommended first):
 python3 alpaca_bot.py --dry-run
 
+# Backfill the dashboard's Portfolio Summary now (no orders):
+python3 alpaca_bot.py --snapshot
+
 # Real run (places orders on the configured account):
 python3 alpaca_bot.py
 ```

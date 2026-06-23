@@ -151,13 +151,24 @@ def update_portfolio_snapshot(api, state):
     """
     Read live equity/cash/positions and store a portfolio snapshot in `state`
     (under "portfolio") so the dashboard can render a live summary from disk
-    without needing Alpaca credentials. `day_pl` is measured against the prior
-    snapshot's equity (≈ change since the last bot run). Mutates and returns state.
+    without needing Alpaca credentials.
+
+    `day_pl` is measured against the day's starting equity (the last snapshot
+    from the prior day ≈ prior close), so it stays a correct intraday day P&L
+    even if snapshots are taken many times per day. Mutates and returns state.
     """
     post_equity, post_cash = get_account_value(api)
     tqqq_sh, sqqq_sh, tqqq_val, sqqq_val = get_current_positions(api)
     prev = state.get("portfolio") or {}
-    prev_equity = prev.get("equity") or post_equity
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    if prev.get("day_start_date") == today and prev.get("day_start_equity"):
+        day_start_equity = prev["day_start_equity"]
+    else:
+        # New trading day: baseline against the prior snapshot's equity
+        # (≈ prior close) so the first reading reflects the overnight change.
+        day_start_equity = prev.get("equity") or post_equity
+
     state["portfolio"] = {
         "equity": post_equity,
         "cash": post_cash,
@@ -165,9 +176,10 @@ def update_portfolio_snapshot(api, state):
         "tqqq_value": tqqq_val,
         "sqqq_shares": sqqq_sh,
         "sqqq_value": sqqq_val,
-        "prev_equity": prev_equity,
-        "day_pl": post_equity - prev_equity,
-        "day_pl_pct": ((post_equity - prev_equity) / prev_equity * 100) if prev_equity else 0.0,
+        "day_start_equity": day_start_equity,
+        "day_start_date": today,
+        "day_pl": post_equity - day_start_equity,
+        "day_pl_pct": ((post_equity - day_start_equity) / day_start_equity * 100) if day_start_equity else 0.0,
         "as_of": datetime.now().isoformat(),
     }
     return state

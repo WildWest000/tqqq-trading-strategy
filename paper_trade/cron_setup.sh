@@ -90,6 +90,29 @@ UPDATE_EOF
 chmod +x "$UPDATE_WRAPPER"
 echo "  ✓ Data-update wrapper created: $UPDATE_WRAPPER"
 
+# --- Step 3c: Create snapshot wrapper script ---
+# Refreshes the dashboard's portfolio snapshot (equity/cash/positions) without
+# trading, so the Portfolio Summary stays fresh intraday and on no-trade days.
+SNAPSHOT_WRAPPER="$SCRIPT_DIR/run_snapshot.sh"
+cat > "$SNAPSHOT_WRAPPER" << SNAPSHOT_EOF
+#!/bin/bash
+# Wrapper script for cron — writes a portfolio snapshot to state.json (no orders)
+set -e
+
+# Load API keys
+source "$ENV_FILE"
+export ALPACA_API_KEY
+export ALPACA_SECRET_KEY
+
+# Ensure Python can find user-installed packages
+export PATH="\$HOME/.local/bin:\$PATH"
+
+cd "$SCRIPT_DIR/.."
+python3 "$BOT_SCRIPT" --snapshot >> "$SCRIPT_DIR/logs/cron.log" 2>&1
+SNAPSHOT_EOF
+chmod +x "$SNAPSHOT_WRAPPER"
+echo "  ✓ Snapshot wrapper created: $SNAPSHOT_WRAPPER"
+
 # --- Step 4: Set up cron ---
 # 3:30 PM EST = 19:30 UTC (EST = UTC-5)
 # During EDT (daylight saving, Mar-Nov): 3:30 PM EDT = 19:30 UTC
@@ -101,18 +124,23 @@ CRON_LINE_EDT="30 19 * * 1-5 $WRAPPER"
 CRON_LINE_EST="30 20 * * 1-5 $WRAPPER"
 # Data refresh: 22:00 UTC (after US market close in both EST/EDT)
 CRON_LINE_UPDATE="0 22 * * 1-5 $UPDATE_WRAPPER"
+# Portfolio snapshot: hourly during US market hours (13:00-21:00 UTC, Mon-Fri)
+# keeps the dashboard's Portfolio Summary fresh even when no trade happens.
+CRON_LINE_SNAPSHOT="0 13-21 * * 1-5 $SNAPSHOT_WRAPPER"
 
 echo ""
 echo "Setting up cron job..."
 
-# Remove any existing bot/update entries
-(crontab -l 2>/dev/null || true) | grep -v "$WRAPPER" | grep -v "$UPDATE_WRAPPER" > /tmp/cron_tmp || true
+# Remove any existing bot/update/snapshot entries
+(crontab -l 2>/dev/null || true) | grep -v "$WRAPPER" | grep -v "$UPDATE_WRAPPER" | grep -v "$SNAPSHOT_WRAPPER" > /tmp/cron_tmp || true
 
 # Add both time slots
 echo "$CRON_LINE_EDT" >> /tmp/cron_tmp
 echo "$CRON_LINE_EST" >> /tmp/cron_tmp
 # Add daily data refresh
 echo "$CRON_LINE_UPDATE" >> /tmp/cron_tmp
+# Add hourly portfolio snapshot
+echo "$CRON_LINE_SNAPSHOT" >> /tmp/cron_tmp
 
 crontab /tmp/cron_tmp
 rm /tmp/cron_tmp
@@ -121,10 +149,12 @@ echo "  ✓ Cron jobs installed:"
 echo "    $CRON_LINE_EDT"
 echo "    $CRON_LINE_EST"
 echo "    $CRON_LINE_UPDATE"
+echo "    $CRON_LINE_SNAPSHOT"
 echo ""
 echo "  The bot runs at both 19:30 and 20:30 UTC to cover EST/EDT."
 echo "  It checks if the market is open and exits early if not."
 echo "  Price data is refreshed daily at 22:00 UTC (after market close)."
+echo "  The portfolio snapshot refreshes hourly during market hours."
 
 # --- Step 5: Verify ---
 echo ""

@@ -100,6 +100,20 @@ The bot runs at **3:30 PM ET** on weekdays (`30 19 * * 1-5` in summer/EDT; use
 > 30 19 * * 1-5 { source ~/.trading_env && source ~/trading-venv/bin/activate && cd ~/tqqq-trading-strategy && python3 paper_trade/alpaca_bot.py; } >> ~/logs/trading.log 2>&1
 > ```
 
+### Portfolio snapshot (keeps the dashboard summary fresh)
+
+The bot writes a portfolio snapshot on every real run, but only once a day and
+only when the market is open. To keep the dashboard's **Portfolio Summary** fresh
+intraday (and on no-trade days), schedule `--snapshot` hourly during market hours
+— it reads equity/cash/positions and writes `state.json` **without trading**:
+
+> ```
+> 0 13-21 * * 1-5 { source ~/.trading_env && source ~/trading-venv/bin/activate && cd ~/tqqq-trading-strategy && python3 paper_trade/alpaca_bot.py --snapshot; } >> ~/logs/trading.log 2>&1
+> ```
+
+(`cron_setup.sh` installs this automatically via `run_snapshot.sh`. Day P&L is
+measured against the day's starting equity, so frequent snapshots stay correct.)
+
 ## Dashboard Service
 
 On the server the dashboard runs as a systemd service (`trading-dashboard.service`,

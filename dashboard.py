@@ -732,8 +732,8 @@ def _build_portfolio_summary(state):
 
     return [
         dbc.Col(kpi_card("Equity", f"${equity:,.0f}", f"as of {as_of}"), width=3),
-        dbc.Col(kpi_card("Since Last Run", f"{day_pl:+,.0f}",
-                         f"{day_pl_pct:+.2f}%", pl_color), width=3),
+        dbc.Col(kpi_card("Day P&L", f"{day_pl:+,.0f}",
+                         f"{day_pl_pct:+.2f}% vs prior close", pl_color), width=3),
         dbc.Col(kpi_card("Cash", f"${cash:,.0f}", f"{cash_pct:.0f}% of equity"), width=2),
         dbc.Col(kpi_card("TQQQ", f"{tqqq_sh:,} sh",
                          f"${tqqq_val:,.0f} · {tqqq_pct:.0f}%"), width=2),

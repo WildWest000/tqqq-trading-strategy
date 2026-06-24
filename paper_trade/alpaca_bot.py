@@ -232,7 +232,26 @@ def cancel_open_tqqq_orders(api, dry_run=False):
             logger.warning(f"Could not cancel order {o.id}: {e}")
 
 
-def manage_protective_stop(api, dry_run=False, expect_position=False):
+def get_protective_stop_order(api):
+    """
+    Return the open TQQQ protective stop sell order (trailing_stop or stop), or
+    None. Used to inspect the current stop's trigger price and quantity so we can
+    decide whether to keep it and preserve its dollar floor when re-arming.
+    """
+    try:
+        open_orders = api.list_orders(status="open")
+    except Exception as e:
+        logger.warning(f"Could not list open orders: {e}")
+        return None
+    for o in open_orders:
+        if (o.symbol == "TQQQ" and getattr(o, "side", "") == "sell"
+                and getattr(o, "type", "") in ("trailing_stop", "stop")):
+            return o
+    return None
+
+
+def manage_protective_stop(api, dry_run=False, expect_position=False,
+                           preserve_stop_price=None):
     """
     Place a fresh intraday protective stop on the current TQQQ position so a
     fast intraday crash is cut WITHOUT waiting for the next daily run.
@@ -242,8 +261,13 @@ def manage_protective_stop(api, dry_run=False, expect_position=False):
     daily backtest cannot model it, so it lives only in the live bot.
 
     When expect_position is True (a buy was just submitted), briefly polls for
-    the market order to fill so the stop is armed the SAME day as the entry
-    rather than on the next run.
+    the market order to fill so the stop is armed the SAME day as the entry.
+
+    When preserve_stop_price is given (the trigger price of the stop we just
+    cancelled because of a rebalance), the trail % is RECALCULATED so the new
+    stop keeps the SAME dollar floor instead of resetting to INTRADAY_STOP_PCT
+    below the current price. Falls back to the default % if the prior floor is
+    no longer valid (price at/below it).
     """
     if not getattr(config, "INTRADAY_STOP_ENABLED", False):
         return
@@ -266,6 +290,21 @@ def manage_protective_stop(api, dry_run=False, expect_position=False):
     pct = config.INTRADAY_STOP_PCT
     trailing = getattr(config, "INTRADAY_TRAILING_STOP", True)
 
+    # If asked to preserve a prior stop floor, recompute the trail % from the
+    # current price so the dollar trigger is maintained.
+    trail_pct = pct
+    preserved = False
+    if preserve_stop_price and not dry_run:
+        try:
+            current_price = api.get_latest_trade("TQQQ").price
+        except Exception:
+            current_price = None
+        if current_price and current_price > preserve_stop_price:
+            computed = (current_price - preserve_stop_price) / current_price
+            if 0 < computed < 1:
+                trail_pct = computed
+                preserved = True
+
     if dry_run:
         kind = f"trailing stop {pct:.0%}" if trailing else f"stop {pct:.0%} below price"
         logger.info(f"[DRY-RUN] Would place protective {kind} SELL {tqqq_shares} TQQQ (GTC)")
@@ -278,13 +317,22 @@ def manage_protective_stop(api, dry_run=False, expect_position=False):
                 qty=tqqq_shares,
                 side="sell",
                 type="trailing_stop",
-                trail_percent=str(round(pct * 100, 2)),
+                trail_percent=str(round(trail_pct * 100, 2)),
                 time_in_force="gtc",
             )
-            logger.info(f"  ✓ Protective TRAILING STOP placed: SELL {tqqq_shares} TQQQ, trail {pct:.0%}")
+            if preserved:
+                logger.info(f"  ✓ Protective TRAILING STOP placed: SELL {tqqq_shares} TQQQ, "
+                            f"trail {trail_pct:.2%} (preserving prior stop @ ${preserve_stop_price:.2f})")
+            else:
+                logger.info(f"  ✓ Protective TRAILING STOP placed: SELL {tqqq_shares} TQQQ, "
+                            f"trail {trail_pct:.0%}")
         else:
-            trade = api.get_latest_trade("TQQQ")
-            stop_price = round(trade.price * (1 - pct), 2)
+            current = api.get_latest_trade("TQQQ").price
+            # Preserve the prior floor if valid, else default % below current.
+            if preserve_stop_price and current > preserve_stop_price:
+                stop_price = round(preserve_stop_price, 2)
+            else:
+                stop_price = round(current * (1 - pct), 2)
             api.submit_order(
                 symbol="TQQQ",
                 qty=tqqq_shares,
@@ -293,7 +341,8 @@ def manage_protective_stop(api, dry_run=False, expect_position=False):
                 stop_price=str(stop_price),
                 time_in_force="gtc",
             )
-            logger.info(f"  ✓ Protective STOP placed: SELL {tqqq_shares} TQQQ @ ${stop_price} ({pct:.0%} below)")
+            logger.info(f"  ✓ Protective STOP placed: SELL {tqqq_shares} TQQQ @ ${stop_price}"
+                        + (" (preserved)" if preserve_stop_price and current > preserve_stop_price else f" ({pct:.0%} below)"))
     except Exception as e:
         logger.error(f"  ✗ Protective stop failed: {e}")
 
@@ -363,41 +412,36 @@ def _await_fill(api, order_id, timeout=20, poll=1.5):
     return None
 
 
-def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc, dry_run=False):
+def plan_rebalance(api, target_tqqq_alloc, target_sqqq_alloc):
     """
-    Rebalance portfolio to target allocations using market orders.
-
-    When dry_run is True, the intended orders are logged but NOT submitted.
+    Compute (without placing) whether a rebalance is needed and the orders to
+    get there. Returns a dict:
+      {"needed": bool, "orders": [(symbol, side, qty), ...],
+       "ref_prices": {symbol: price}, "target_tqqq_shares": int}
+    Logs the current vs target snapshot. "needed" is False when drift is below
+    the threshold (no trade required).
     """
     equity, cash = get_account_value(api)
     tqqq_shares, sqqq_shares, tqqq_value, sqqq_value = get_current_positions(api)
 
-    # Current allocations
     actual_tqqq_alloc = tqqq_value / equity if equity > 0 else 0
     actual_sqqq_alloc = sqqq_value / equity if equity > 0 else 0
 
     logger.info(f"Current: TQQQ={actual_tqqq_alloc:.1%} ({tqqq_shares} shares), "
                 f"SQQQ={actual_sqqq_alloc:.1%} ({sqqq_shares} shares), Cash=${cash:,.2f}")
 
-    # Check drift
     tqqq_drift = abs(actual_tqqq_alloc - target_tqqq_alloc)
     sqqq_drift = abs(actual_sqqq_alloc - target_sqqq_alloc)
 
     if tqqq_drift < config.REBALANCE_THRESHOLD and sqqq_drift < config.REBALANCE_THRESHOLD:
-        logger.info("Drift below threshold — no rebalance needed")
-        return False
+        return {"needed": False, "orders": [], "ref_prices": {}, "target_tqqq_shares": tqqq_shares}
 
-    # Get current prices
-    tqqq_quote = api.get_latest_trade("TQQQ")
-    sqqq_quote = api.get_latest_trade("SQQQ")
-    tqqq_price = tqqq_quote.price
-    sqqq_price = sqqq_quote.price
+    tqqq_price = api.get_latest_trade("TQQQ").price
+    sqqq_price = api.get_latest_trade("SQQQ").price
 
-    # Target shares (whole shares only)
     target_tqqq_shares = int((equity * target_tqqq_alloc) / tqqq_price)
     target_sqqq_shares = int((equity * target_sqqq_alloc) / sqqq_price)
 
-    # Calculate deltas
     tqqq_delta = target_tqqq_shares - tqqq_shares
     sqqq_delta = target_sqqq_shares - sqqq_shares
 
@@ -406,25 +450,34 @@ def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc, dry_run=False):
 
     # Execute sells first (to free up cash), then buys
     orders = []
-
-    # TQQQ
     if tqqq_delta < 0:
         orders.insert(0, ("TQQQ", "sell", abs(tqqq_delta)))
     elif tqqq_delta > 0:
         orders.append(("TQQQ", "buy", tqqq_delta))
-
-    # SQQQ
     if sqqq_delta < 0:
         orders.insert(0, ("SQQQ", "sell", abs(sqqq_delta)))
     elif sqqq_delta > 0:
         orders.append(("SQQQ", "buy", sqqq_delta))
 
-    # Reference (submit-time) prices, keyed by symbol, for slippage reporting.
-    ref_prices = {"TQQQ": tqqq_price, "SQQQ": sqqq_price}
+    return {
+        "needed": True,
+        "orders": orders,
+        "ref_prices": {"TQQQ": tqqq_price, "SQQQ": sqqq_price},
+        "target_tqqq_shares": target_tqqq_shares,
+    }
 
+
+def place_orders(api, orders, ref_prices, dry_run=False):
+    """
+    Submit the planned market orders, logging the submit (reference) price and
+    polling for the average fill price. Returns True if any order was placed
+    (or would be in dry-run).
+    """
+    placed = False
     for symbol, side, qty in orders:
         if qty == 0:
             continue
+        placed = True
         ref_price = ref_prices.get(symbol, 0.0)
         if dry_run:
             logger.info(f"[DRY-RUN] Would submit: {side.upper()} {qty} {symbol} "
@@ -450,7 +503,21 @@ def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc, dry_run=False):
                             f"@ ~${ref_price:.2f} (fill pending)")
         except Exception as e:
             logger.error(f"  ✗ Order failed: {side.upper()} {qty} {symbol}: {e}")
+    return placed
 
+
+def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc, dry_run=False):
+    """
+    Rebalance to target allocations using market orders (thin wrapper around
+    plan_rebalance + place_orders). Returns True if a rebalance was performed.
+
+    When dry_run is True, the intended orders are logged but NOT submitted.
+    """
+    plan = plan_rebalance(api, target_tqqq_alloc, target_sqqq_alloc)
+    if not plan["needed"]:
+        logger.info("Drift below threshold — no rebalance needed")
+        return False
+    place_orders(api, plan["orders"], plan["ref_prices"], dry_run=dry_run)
     return True
 
 
@@ -519,14 +586,48 @@ def run(dry_run=False):
         tqqq_alloc = 0.0
         sqqq_alloc = 0.0
 
-    # Execute rebalance
-    # Cancel any resting protective stop first so it doesn't tie up shares or
-    # conflict with the rebalance market orders.
-    cancel_open_tqqq_orders(api, dry_run=dry_run)
-    traded = execute_rebalance(api, tqqq_alloc, sqqq_alloc, dry_run=dry_run)
+    # --- Rebalance + protective stop management ---
+    # Inspect the existing protective stop so we can decide whether to keep it.
+    existing_stop = None if dry_run else get_protective_stop_order(api)
+    prev_stop_price = None
+    if existing_stop is not None and getattr(existing_stop, "stop_price", None):
+        try:
+            prev_stop_price = float(existing_stop.stop_price)
+        except (TypeError, ValueError):
+            prev_stop_price = None
+    existing_stop_qty = int(float(existing_stop.qty)) if existing_stop is not None else 0
 
-    # Re-arm the intraday protective stop on the resulting TQQQ position.
-    manage_protective_stop(api, dry_run=dry_run, expect_position=(tqqq_alloc > 0))
+    # Plan the rebalance (no orders placed yet) so we know whether we must touch
+    # the resting stop at all.
+    plan = plan_rebalance(api, tqqq_alloc, sqqq_alloc)
+    if not plan["needed"]:
+        logger.info("Drift below threshold — no rebalance needed")
+
+    if dry_run:
+        traded = place_orders(api, plan["orders"], plan["ref_prices"], dry_run=True)
+        manage_protective_stop(api, dry_run=True, expect_position=(tqqq_alloc > 0))
+    elif plan["needed"]:
+        # A trade will change the position — cancel the resting stop first (so it
+        # doesn't tie up shares), execute, then re-arm preserving the prior floor.
+        cancel_open_tqqq_orders(api)
+        traded = place_orders(api, plan["orders"], plan["ref_prices"])
+        manage_protective_stop(api, expect_position=(tqqq_alloc > 0),
+                               preserve_stop_price=prev_stop_price)
+    else:
+        # No trade: leave the existing stop in place so it keeps trailing the
+        # high-water mark. Only (re-)arm if missing or its qty no longer matches.
+        traded = False
+        cur_tqqq_shares, _, _, _ = get_current_positions(api)
+        if existing_stop is None:
+            manage_protective_stop(api, expect_position=(tqqq_alloc > 0))
+        elif existing_stop_qty != cur_tqqq_shares:
+            logger.info(f"Protective stop qty ({existing_stop_qty}) != position "
+                        f"({cur_tqqq_shares}) — re-arming")
+            cancel_open_tqqq_orders(api)
+            manage_protective_stop(api, preserve_stop_price=prev_stop_price)
+        else:
+            floor = f" (stop @ ${prev_stop_price:.2f})" if prev_stop_price else ""
+            logger.info(f"Keeping existing protective stop{floor} — unchanged")
 
     # Update state (skipped in dry-run — preview only)
     if not dry_run:

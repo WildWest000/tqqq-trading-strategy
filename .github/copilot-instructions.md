@@ -59,7 +59,7 @@ bar's own close.
 - Paper vs live is set by env vars (`ALPACA_PAPER`, default paper; or `ALPACA_BASE_URL`); `--dry-run` previews without trading.
 - The bot writes one log file per month: `paper_trade/logs/trade_YYYYMM.log`.
 - `mom_vol` short-horizon overlays (`indicators.apply_short_horizon_overlays`: vol-targeting, exposure cap, re-entry cooldown) are causal (applied pre-shift) and **default OFF** — backtests show they trim long-run return without improving Sharpe.
-- The live bot arms a broker-side intraday trailing stop on TQQQ after buys (`INTRADAY_STOP_*`); it's re-armed each run and is the only mechanism that reacts to single-day crashes (not backtestable in the daily engine).
+- The live bot arms a broker-side intraday trailing stop on TQQQ after buys (`INTRADAY_STOP_*`); it is the only mechanism that reacts to single-day crashes (not backtestable in the daily engine). It is **kept across no-trade days** to preserve its trailing high-water mark, and only cancelled/re-armed on a rebalance (or qty mismatch); when re-armed after a trade the trail % is recomputed to preserve the prior stop's dollar trigger (`get_protective_stop_order` + `manage_protective_stop(preserve_stop_price=...)`).
 - Bot order logs carry submit (reference) and average fill prices; `state.json` also holds a `portfolio` snapshot (equity/cash/positions/day P&L) that the dashboard's Confirmations tab renders as a portfolio summary + price/slippage columns.
 - On the server the dashboard runs as `trading-dashboard.service` (systemd); restart with `sudo systemctl restart trading-dashboard`, never `kill`/`pkill`.
 - Cron must set `SHELL=/bin/bash` (the bot/data-update lines use the bash builtin `source`).

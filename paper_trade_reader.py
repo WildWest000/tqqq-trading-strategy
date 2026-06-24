@@ -24,7 +24,7 @@ STATE_FILE = os.path.join(PAPER_TRADE_DIR, "state.json")
 
 # Matches: "2026-06-19 19:30:01,123 [INFO] message text"
 _LOG_LINE_RE = re.compile(
-    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[.,]?\d* \[(?P<level>\w+)\] (?P<msg>.*)$"
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[.,]?\d*(?: [A-Z]{2,4})? \[(?P<level>\w+)\] (?P<msg>.*)$"
 )
 
 # Order line, e.g. "Submitting: BUY 5 TQQQ @ ~$73.05 (ref)" or

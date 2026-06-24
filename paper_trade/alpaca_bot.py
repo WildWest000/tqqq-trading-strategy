@@ -34,6 +34,7 @@ import json
 import time
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import numpy as np
@@ -86,13 +87,27 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.jso
 # One log file per month (e.g. trade_202606.log); runs append to it all month.
 os.makedirs(LOG_DIR, exist_ok=True)
 log_file = os.path.join(LOG_DIR, f"trade_{datetime.now().strftime('%Y%m')}.log")
+
+
+class _PacificFormatter(logging.Formatter):
+    """Render log timestamps in US/Pacific time (auto PST/PDT) instead of UTC."""
+    _PACIFIC = ZoneInfo("America/Los_Angeles")
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=self._PACIFIC)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+_log_formatter = _PacificFormatter("%(asctime)s [%(levelname)s] %(message)s")
+_file_handler = logging.FileHandler(log_file)
+_file_handler.setFormatter(_log_formatter)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_log_formatter)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(log_file),
-        logging.StreamHandler()
-    ]
+    handlers=[_file_handler, _stream_handler],
 )
 logger = logging.getLogger(__name__)
 

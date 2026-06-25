@@ -721,6 +721,10 @@ def _build_portfolio_summary(state):
     sqqq_val = snap.get("sqqq_value", 0) or 0
     day_pl = snap.get("day_pl", 0) or 0
     day_pl_pct = snap.get("day_pl_pct", 0) or 0
+    total_pl = snap.get("total_pl", 0) or 0
+    total_pl_pct = snap.get("total_pl_pct", 0) or 0
+    realized_pl = snap.get("realized_pl", 0) or 0
+    unrealized_pl = snap.get("unrealized_pl", 0) or 0
     as_of = snap.get("as_of", "")
     if isinstance(as_of, str) and "T" in as_of:
         as_of = as_of.replace("T", " ")[:19]
@@ -729,16 +733,25 @@ def _build_portfolio_summary(state):
     sqqq_pct = (sqqq_val / equity * 100) if equity else 0
     cash_pct = (cash / equity * 100) if equity else 0
     pl_color = "success" if day_pl >= 0 else "danger"
+    total_color = "success" if total_pl >= 0 else "danger"
 
     return [
         dbc.Col(kpi_card("Equity", f"${equity:,.0f}", f"as of {as_of}"), width=3),
+        dbc.Col(kpi_card("Total P&L", f"{total_pl:+,.0f}",
+                         f"{total_pl_pct:+.2f}% since inception", total_color), width=3),
+        dbc.Col(kpi_card("Realized P&L", f"{realized_pl:+,.0f}",
+                         "booked gains/losses",
+                         "success" if realized_pl >= 0 else "danger"), width=3),
+        dbc.Col(kpi_card("Unrealized P&L", f"{unrealized_pl:+,.0f}",
+                         "open positions (mark-to-market)",
+                         "success" if unrealized_pl >= 0 else "danger"), width=3),
         dbc.Col(kpi_card("Day P&L", f"{day_pl:+,.0f}",
                          f"{day_pl_pct:+.2f}% vs prior close", pl_color), width=3),
-        dbc.Col(kpi_card("Cash", f"${cash:,.0f}", f"{cash_pct:.0f}% of equity"), width=2),
+        dbc.Col(kpi_card("Cash", f"${cash:,.0f}", f"{cash_pct:.0f}% of equity"), width=3),
         dbc.Col(kpi_card("TQQQ", f"{tqqq_sh:,} sh",
-                         f"${tqqq_val:,.0f} · {tqqq_pct:.0f}%"), width=2),
+                         f"${tqqq_val:,.0f} · {tqqq_pct:.0f}%"), width=3),
         dbc.Col(kpi_card("SQQQ", f"{sqqq_sh:,} sh",
-                         f"${sqqq_val:,.0f} · {sqqq_pct:.0f}%"), width=2),
+                         f"${sqqq_val:,.0f} · {sqqq_pct:.0f}%"), width=3),
     ]
 
 
@@ -778,10 +791,48 @@ _CONFIRM_BADGE = {
     "order_failed": ("FAILED", "danger"),
     "trailing_stop": ("TRAILING STOP", "danger"),
     "protective_stop": ("PROTECTIVE STOP", "warning"),
+    "stop_triggered": ("STOP TRIGGERED", "danger"),
     "rebalance": ("REBALANCED", "primary"),
     "no_action": ("NO ACTION", "secondary"),
     "cash_mode": ("CASH MODE", "warning"),
 }
+
+
+def _format_detail(ev):
+    """Build a verbose, human-readable Detail string for a confirmation event."""
+    etype = ev["type"]
+    has_order = "symbol" in ev
+    side = ev.get("side", "").upper()
+    qty = ev.get("qty")
+    symbol = ev.get("symbol", "")
+
+    # Allocation transition, e.g. "13.4% → 54.0%".
+    alloc_str = ""
+    if ev.get("alloc_from") is not None and ev.get("alloc_to") is not None:
+        alloc_str = f" · alloc {ev['alloc_from']:.1f}% → {ev['alloc_to']:.1f}%"
+
+    if etype == "stop_triggered":
+        px = f" @ ${ev['fill_price']:,.2f}" if ev.get("fill_price") else ""
+        return f"🛑 Stop loss hit — {side} {qty} {symbol}{px}".strip()
+
+    if etype == "protective_stop":
+        bits = []
+        if has_order:
+            bits.append(f"{side} {qty} {symbol}")
+        if ev.get("trail_pct") is not None:
+            bits.append(f"trail {ev['trail_pct']:.2f}%")
+        if ev.get("stop_price") is not None:
+            bits.append(f"floor ${ev['stop_price']:,.2f}")
+        return "Protective stop · " + " · ".join(bits) if bits else ev["message"][:90]
+
+    if has_order:
+        verb = {"order_filled": "Filled", "order_submitted": "Submitted",
+                "order_failed": "Failed"}.get(etype, side.title())
+        base = f"{verb}: {side} {qty} {symbol}" if etype.startswith("order") else f"{side} {qty} {symbol}"
+        return base + alloc_str
+
+    # Non-order events (rebalance summary, cash mode, no action): show message.
+    return ev["message"][:90]
 
 
 def _build_confirmations_table(events):
@@ -795,10 +846,7 @@ def _build_confirmations_table(events):
     rows = []
     for ev in events:
         label, color = _CONFIRM_BADGE.get(ev["type"], (ev["type"].upper(), "secondary"))
-        if "symbol" in ev:
-            detail = f"{ev['side'].upper()} {ev['qty']} {ev['symbol']}"
-        else:
-            detail = ev["message"][:80]
+        detail = _format_detail(ev)
         submit_px = f"${ev['submit_price']:,.2f}" if ev.get("submit_price") else "—"
         fill_px = f"${ev['fill_price']:,.2f}" if ev.get("fill_price") else "—"
         # Slippage badge when both prices are known.

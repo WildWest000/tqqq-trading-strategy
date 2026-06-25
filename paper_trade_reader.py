@@ -4,7 +4,8 @@ Read and parse Alpaca paper-trading bot artifacts for the dashboard.
 The live bot (paper_trade/alpaca_bot.py) persists:
 - paper_trade/state.json: trailing-stop state {portfolio_peak, in_cash_mode,
   cash_mode_days, last_regime, last_run} plus a "portfolio" snapshot
-  {equity, cash, tqqq_shares/value, sqqq_shares/value, day_pl, day_pl_pct, as_of}.
+  {equity, cash, tqqq_shares/value, sqqq_shares/value, day_pl, day_pl_pct,
+  total_pl, realized_pl, unrealized_pl, as_of}.
 - paper_trade/logs/trade_YYYYMM.log: human-readable monthly logs whose lines
   follow the format "%(asctime)s [%(levelname)s] %(message)s". Order lines carry
   the submit (reference) price and, once filled, the average fill price.
@@ -38,6 +39,15 @@ _ORDER_RE = re.compile(
 # "submitted @ $Y" gives the original reference price on a filled line.
 _PRICE_RE = re.compile(r"@\s*~?\$(?P<price>[\d,]+\.?\d*)")
 _SUBMITTED_PRICE_RE = re.compile(r"submitted @\s*\$(?P<price>[\d,]+\.?\d*)")
+
+# Allocation transition tag, e.g. "[TQQQ 13.4% → 54.0%]" added to order lines.
+_ALLOC_RE = re.compile(
+    r"\[(?P<sym>[A-Z]{2,5})\s+(?P<from>[\d.]+)%\s*(?:→|->)\s*(?P<to>[\d.]+)%\]"
+)
+# Trailing-stop trail percent, e.g. "trail 5.15%" or "trail 8%".
+_TRAIL_RE = re.compile(r"trail\s+(?P<trail>[\d.]+)%")
+# Preserved/placed stop floor, e.g. "stop @ $92.00" or "preserving prior stop @ $92.00".
+_STOP_PRICE_RE = re.compile(r"stop @\s*\$(?P<price>[\d,]+\.?\d*)")
 
 
 def load_bot_state() -> dict | None:
@@ -109,6 +119,18 @@ def _classify(msg: str) -> tuple[str, dict]:
     def _to_float(s):
         return float(s.replace(",", ""))
 
+    # Allocation transition (from% → to%) present on rebalance order lines.
+    alloc = _ALLOC_RE.search(msg)
+    if alloc:
+        extra["alloc_from"] = float(alloc.group("from"))
+        extra["alloc_to"] = float(alloc.group("to"))
+
+    # Stop loss actually fired (broker-executed protective stop).
+    if "stop loss triggered" in low:
+        p = _PRICE_RE.search(msg)
+        if p:
+            extra["fill_price"] = _to_float(p.group("price"))
+        return "stop_triggered", extra
     if "order filled" in low:
         # "@ $fill ... (submitted @ $ref ...)"
         prices = _PRICE_RE.findall(msg)
@@ -128,6 +150,12 @@ def _classify(msg: str) -> tuple[str, dict]:
         return "order_submitted", extra
     if "protective" in low and "stop" in low:
         # Intraday protective stop placement / status (not a drawdown trigger).
+        trail = _TRAIL_RE.search(msg)
+        if trail:
+            extra["trail_pct"] = float(trail.group("trail"))
+        sp = _STOP_PRICE_RE.search(msg)
+        if sp:
+            extra["stop_price"] = _to_float(sp.group("price"))
         return "protective_stop", extra
     if "trailing stop" in low:
         return "trailing_stop", extra
@@ -143,7 +171,8 @@ def _classify(msg: str) -> tuple[str, dict]:
 # Event categories surfaced as "trading confirmations".
 CONFIRMATION_TYPES = {
     "order_submitted", "order_filled", "order_failed",
-    "trailing_stop", "protective_stop", "rebalance", "no_action", "cash_mode",
+    "trailing_stop", "protective_stop", "stop_triggered",
+    "rebalance", "no_action", "cash_mode",
 }
 
 

@@ -36,6 +36,11 @@ INTRADAY_STOP_PCT = 0.08        # Stop distance below entry/high (e.g. 0.08 = 8%
 STARTING_CAPITAL = 10_000
 RISK_FREE_RATE = 0.045  # Annual risk-free rate (T-bill ~4.5%)
 
+# Initial equity of the live Alpaca PAPER account (the funding it started with).
+# Used by the bot/dashboard to split total P&L into realized vs unrealized:
+#   total_pl = equity - PAPER_INITIAL_EQUITY;  realized = total_pl - unrealized.
+PAPER_INITIAL_EQUITY = 100_000
+
 # --- Default Backtest Period (user overrides in dashboard) ---
 DEFAULT_BACKTEST_START = "2020-01-01"
 # End defaults to today so backtests always include the latest available data.

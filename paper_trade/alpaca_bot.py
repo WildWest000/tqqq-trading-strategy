@@ -176,6 +176,18 @@ def update_portfolio_snapshot(api, state):
     tqqq_sh, sqqq_sh, tqqq_val, sqqq_val = get_current_positions(api)
     prev = state.get("portfolio") or {}
 
+    # Unrealized P&L = open-position mark-to-market gains; realized P&L is the
+    # remainder of total account P&L (equity above the account's initial funding).
+    unrealized_pl = 0.0
+    try:
+        for p in api.list_positions():
+            unrealized_pl += float(getattr(p, "unrealized_pl", 0) or 0)
+    except Exception as e:
+        logger.warning(f"Could not read unrealized P&L: {e}")
+    initial_equity = getattr(config, "PAPER_INITIAL_EQUITY", 100_000)
+    total_pl = post_equity - initial_equity
+    realized_pl = total_pl - unrealized_pl
+
     today = datetime.now().strftime("%Y-%m-%d")
     if prev.get("day_start_date") == today and prev.get("day_start_equity"):
         day_start_equity = prev["day_start_equity"]
@@ -195,6 +207,11 @@ def update_portfolio_snapshot(api, state):
         "day_start_date": today,
         "day_pl": post_equity - day_start_equity,
         "day_pl_pct": ((post_equity - day_start_equity) / day_start_equity * 100) if day_start_equity else 0.0,
+        "total_pl": total_pl,
+        "total_pl_pct": (total_pl / initial_equity * 100) if initial_equity else 0.0,
+        "realized_pl": realized_pl,
+        "unrealized_pl": unrealized_pl,
+        "initial_equity": initial_equity,
         "as_of": datetime.now().isoformat(),
     }
     return state
@@ -263,6 +280,55 @@ def get_protective_stop_order(api):
                 and getattr(o, "type", "") in ("trailing_stop", "stop")):
             return o
     return None
+
+
+def report_triggered_stops(api, since_iso):
+    """
+    Detect protective stops that FIRED since the last run and log them so the
+    dashboard can surface "stop loss triggered @ $price".
+
+    A broker-side trailing/fixed stop is executed by Alpaca (not the bot) when
+    the trigger is hit, so the only evidence is a filled SELL order of type
+    trailing_stop/stop. We look at recently closed orders filled after the last
+    run timestamp and log each one.
+    """
+    try:
+        closed = api.list_orders(status="closed", limit=50)
+    except Exception as e:
+        logger.warning(f"Could not list closed orders: {e}")
+        return
+
+    since = None
+    if since_iso:
+        try:
+            since = datetime.fromisoformat(str(since_iso))
+        except ValueError:
+            since = None
+
+    for o in closed:
+        if getattr(o, "symbol", "") != "TQQQ":
+            continue
+        if getattr(o, "side", "") != "sell":
+            continue
+        if getattr(o, "type", "") not in ("trailing_stop", "stop"):
+            continue
+        if getattr(o, "status", "") != "filled":
+            continue
+        filled_at = getattr(o, "filled_at", None)
+        if since is not None and filled_at is not None:
+            try:
+                ts = filled_at if isinstance(filled_at, datetime) else \
+                    datetime.fromisoformat(str(filled_at).replace("Z", "+00:00"))
+                # Compare naively (drop tz) against the stored last_run.
+                if ts.replace(tzinfo=None) <= since.replace(tzinfo=None):
+                    continue
+            except (ValueError, TypeError):
+                pass
+        qty = int(float(getattr(o, "filled_qty", 0) or getattr(o, "qty", 0) or 0))
+        price = getattr(o, "filled_avg_price", None)
+        price_str = f"${float(price):,.2f}" if price else "market"
+        logger.warning(f"🛑 STOP LOSS TRIGGERED: SELL {qty} TQQQ @ {price_str} "
+                       f"(protective stop executed)")
 
 
 def manage_protective_stop(api, dry_run=False, expect_position=False,
@@ -449,7 +515,8 @@ def plan_rebalance(api, target_tqqq_alloc, target_sqqq_alloc):
     sqqq_drift = abs(actual_sqqq_alloc - target_sqqq_alloc)
 
     if tqqq_drift < config.REBALANCE_THRESHOLD and sqqq_drift < config.REBALANCE_THRESHOLD:
-        return {"needed": False, "orders": [], "ref_prices": {}, "target_tqqq_shares": tqqq_shares}
+        return {"needed": False, "orders": [], "ref_prices": {},
+                "target_tqqq_shares": tqqq_shares, "alloc_map": {}}
 
     tqqq_price = api.get_latest_trade("TQQQ").price
     sqqq_price = api.get_latest_trade("SQQQ").price
@@ -462,6 +529,13 @@ def plan_rebalance(api, target_tqqq_alloc, target_sqqq_alloc):
 
     logger.info(f"Target: TQQQ={target_tqqq_alloc:.0%} ({target_tqqq_shares} shares), "
                 f"SQQQ={target_sqqq_alloc:.0%} ({target_sqqq_shares} shares)")
+
+    # From→to allocation per symbol, so each order line is self-describing
+    # (e.g. "TQQQ 13.4% → 54.0%") for the dashboard's Detail column.
+    alloc_map = {
+        "TQQQ": (actual_tqqq_alloc * 100, target_tqqq_alloc * 100),
+        "SQQQ": (actual_sqqq_alloc * 100, target_sqqq_alloc * 100),
+    }
 
     # Execute sells first (to free up cash), then buys
     orders = []
@@ -479,26 +553,33 @@ def plan_rebalance(api, target_tqqq_alloc, target_sqqq_alloc):
         "orders": orders,
         "ref_prices": {"TQQQ": tqqq_price, "SQQQ": sqqq_price},
         "target_tqqq_shares": target_tqqq_shares,
+        "alloc_map": alloc_map,
     }
 
 
-def place_orders(api, orders, ref_prices, dry_run=False):
+def place_orders(api, orders, ref_prices, dry_run=False, alloc_map=None):
     """
     Submit the planned market orders, logging the submit (reference) price and
     polling for the average fill price. Returns True if any order was placed
     (or would be in dry-run).
+
+    `alloc_map` (optional) maps symbol -> (from_pct, to_pct) so each order line
+    records the allocation transition the trade is moving toward.
     """
+    alloc_map = alloc_map or {}
     placed = False
     for symbol, side, qty in orders:
         if qty == 0:
             continue
         placed = True
         ref_price = ref_prices.get(symbol, 0.0)
+        alloc = alloc_map.get(symbol)
+        alloc_str = f" [{symbol} {alloc[0]:.1f}% → {alloc[1]:.1f}%]" if alloc else ""
         if dry_run:
             logger.info(f"[DRY-RUN] Would submit: {side.upper()} {qty} {symbol} "
-                        f"@ ~${ref_price:.2f} (no order placed)")
+                        f"@ ~${ref_price:.2f} (no order placed){alloc_str}")
             continue
-        logger.info(f"Submitting: {side.upper()} {qty} {symbol} @ ~${ref_price:.2f} (ref)")
+        logger.info(f"Submitting: {side.upper()} {qty} {symbol} @ ~${ref_price:.2f} (ref){alloc_str}")
         try:
             order = api.submit_order(
                 symbol=symbol,
@@ -512,10 +593,10 @@ def place_orders(api, orders, ref_prices, dry_run=False):
                 slip = ((fill_price - ref_price) / ref_price * 100) if ref_price else 0.0
                 logger.info(f"  ✓ Order filled: {side.upper()} {qty} {symbol} "
                             f"@ ${fill_price:.2f} (submitted @ ${ref_price:.2f}, "
-                            f"slippage {slip:+.2f}%)")
+                            f"slippage {slip:+.2f}%){alloc_str}")
             else:
                 logger.info(f"  ✓ Order submitted: {side.upper()} {qty} {symbol} "
-                            f"@ ~${ref_price:.2f} (fill pending)")
+                            f"@ ~${ref_price:.2f} (fill pending){alloc_str}")
         except Exception as e:
             logger.error(f"  ✗ Order failed: {side.upper()} {qty} {symbol}: {e}")
     return placed
@@ -532,7 +613,8 @@ def execute_rebalance(api, target_tqqq_alloc, target_sqqq_alloc, dry_run=False):
     if not plan["needed"]:
         logger.info("Drift below threshold — no rebalance needed")
         return False
-    place_orders(api, plan["orders"], plan["ref_prices"], dry_run=dry_run)
+    place_orders(api, plan["orders"], plan["ref_prices"], dry_run=dry_run,
+                 alloc_map=plan.get("alloc_map"))
     return True
 
 
@@ -602,6 +684,11 @@ def run(dry_run=False):
         sqqq_alloc = 0.0
 
     # --- Rebalance + protective stop management ---
+    # Surface any protective stop that fired since the last run (the broker
+    # executes these, so the bot only learns about them after the fact).
+    if not dry_run:
+        report_triggered_stops(api, state.get("last_run"))
+
     # Inspect the existing protective stop so we can decide whether to keep it.
     existing_stop = None if dry_run else get_protective_stop_order(api)
     prev_stop_price = None
@@ -619,13 +706,15 @@ def run(dry_run=False):
         logger.info("Drift below threshold — no rebalance needed")
 
     if dry_run:
-        traded = place_orders(api, plan["orders"], plan["ref_prices"], dry_run=True)
+        traded = place_orders(api, plan["orders"], plan["ref_prices"], dry_run=True,
+                              alloc_map=plan.get("alloc_map"))
         manage_protective_stop(api, dry_run=True, expect_position=(tqqq_alloc > 0))
     elif plan["needed"]:
         # A trade will change the position — cancel the resting stop first (so it
         # doesn't tie up shares), execute, then re-arm preserving the prior floor.
         cancel_open_tqqq_orders(api)
-        traded = place_orders(api, plan["orders"], plan["ref_prices"])
+        traded = place_orders(api, plan["orders"], plan["ref_prices"],
+                              alloc_map=plan.get("alloc_map"))
         manage_protective_stop(api, expect_position=(tqqq_alloc > 0),
                                preserve_stop_price=prev_stop_price)
     else:

@@ -9,9 +9,9 @@ on Alpaca's paper trading platform.
 2. Downloads latest market data from yfinance
 3. Computes regime (bull/neutral/bear/crisis) and target allocation
 4. Applies trailing stop logic (25% drawdown → go to cash)
-5. **Only when a rebalance is needed**, cancels the resting protective stop, then submits market orders (whole shares only), logging the **submit (reference) price** and polling each order for its **average fill price**. On no-trade days the existing stop is left untouched so it keeps trailing the high-water mark.
-6. Arms an **intraday protective stop** on the TQQQ position (trailing, default 8%) so a fast crash is cut within the day. When a trade forces the stop to be recreated, the trail % is **recalculated to preserve the prior stop's dollar trigger** rather than resetting 8% below the new price.
-7. Persists a **portfolio snapshot** (equity, cash, positions, P&L since last run) to `state.json` and logs every decision and trade to `logs/`
+5. **Only when a rebalance is needed**, cancels the resting protective stop, then submits market orders (whole shares only), logging the **submit (reference) price**, the **average fill price**, and the **allocation transition** (e.g. `TQQQ 13.4% → 54.0%`). On no-trade days the existing stop is left untouched so it keeps trailing the high-water mark.
+6. Arms an **intraday protective stop** on the TQQQ position (trailing, default 8%) so a fast crash is cut within the day. When a trade forces the stop to be recreated, the trail % is **recalculated to preserve the prior stop's dollar trigger** rather than resetting 8% below the new price. If a stop **fires** between runs, the next run logs `STOP LOSS TRIGGERED … @ $price`.
+7. Persists a **portfolio snapshot** (equity, cash, positions, day P&L, plus **total/realized/unrealized P&L** vs the account's initial funding `PAPER_INITIAL_EQUITY`) to `state.json` and logs every decision and trade to `logs/`
 
 ## Quick Start
 

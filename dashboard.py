@@ -188,6 +188,24 @@ def _logs_tab():
     ])
 
 
+def _regime_tab():
+    """Tab: current-day regime calculation with a full component breakdown."""
+    return html.Div([
+        dbc.Row([
+            dbc.Col(html.Small(
+                "How today's regime and target allocation are derived from the live signal "
+                "engine (indicators.generate_signals, unshifted — same as the bot at the close).",
+                className="text-muted"), width=9),
+            dbc.Col(
+                dbc.Button("↻ Recompute", id="regime-refresh-btn", color="secondary",
+                           size="sm", className="float-end"),
+                width=3),
+        ], className="align-items-center mb-2 pt-2"),
+
+        dcc.Loading(html.Div(id="regime-content"), type="default"),
+    ])
+
+
 # --- Layout ---
 
 # Build the header subtitle dynamically so it reflects whatever risk controls
@@ -231,10 +249,11 @@ app.layout = dbc.Container([
     dcc.Interval(id="data-refresh-interval", interval=6 * 60 * 60 * 1000, n_intervals=0),
     
     # Tabbed interface
-    dbc.Tabs(id="main-tabs", active_tab="tab-backtest", className="mb-3", children=[
-        dbc.Tab(label="Backtesting", tab_id="tab-backtest", children=_backtest_tab()),
+    dbc.Tabs(id="main-tabs", active_tab="tab-confirm", className="mb-3", children=[
         dbc.Tab(label="Trading Confirmations", tab_id="tab-confirm", children=_confirmations_tab()),
+        dbc.Tab(label="Regime", tab_id="tab-regime", children=_regime_tab()),
         dbc.Tab(label="Logs", tab_id="tab-logs", children=_logs_tab()),
+        dbc.Tab(label="Backtesting", tab_id="tab-backtest", children=_backtest_tab()),
     ]),
     
     # Hidden stores
@@ -659,6 +678,25 @@ def refresh_confirmations(n_clicks, active_tab):
             _build_confirmations_table(events))
 
 
+# --- Regime Tab Callback ---
+
+@app.callback(
+    Output("regime-content", "children"),
+    [Input("regime-refresh-btn", "n_clicks"),
+     Input("main-tabs", "active_tab")],
+    prevent_initial_call=False,
+)
+def refresh_regime(n_clicks, active_tab):
+    """Compute and render the current-day regime breakdown when the tab is open."""
+    trigger = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
+    # Only do the (network) computation when the Regime tab is actually shown or
+    # the user explicitly clicks Recompute — not on every unrelated tab switch.
+    if active_tab != "tab-regime" and "regime-refresh-btn" not in trigger:
+        return no_update
+    data = _current_regime_data()
+    return _build_regime_view(data)
+
+
 # --- Logs Tab Callbacks ---
 
 @app.callback(
@@ -874,6 +912,238 @@ def _build_confirmations_table(events):
     ]))
     return dbc.Table([header, html.Tbody(rows)],
                      bordered=True, hover=True, color="dark", size="sm", striped=True)
+
+
+# --- Regime Tab ---
+
+def _current_regime_data():
+    """
+    Compute the current-day regime + full component breakdown from live data,
+    using the same signal engine (unshifted) as the bot at the close. Falls back
+    to the bot's saved state.json if the download/compute fails.
+
+    Returns a dict; data["source"] is "live" (full breakdown) or "cached"
+    (label only, from state.json).
+    """
+    def _f(v):
+        try:
+            f = float(v)
+            return f if f == f else None  # drop NaN
+        except (TypeError, ValueError):
+            return None
+
+    try:
+        import indicators
+        import yfinance as yf
+
+        lookback_days = 400
+        frames = {}
+        for sym in ("QQQ", "TQQQ", "SQQQ"):
+            d = yf.download(sym, period=f"{lookback_days}d", progress=False, auto_adjust=True)
+            if isinstance(d.columns, pd.MultiIndex):
+                d.columns = d.columns.droplevel(1)
+            frames[sym] = d
+        qqq, tqqq, sqqq = frames["QQQ"], frames["TQQQ"], frames["SQQQ"]
+        if len(qqq) < 60 or len(tqqq) < 60:
+            raise ValueError(f"insufficient data (QQQ={len(qqq)}, TQQQ={len(tqqq)})")
+
+        signals = indicators.generate_signals(tqqq, sqqq, qqq, shift_signals=False)
+        if signals.empty:
+            raise ValueError("signal engine returned no rows")
+
+        row = signals.iloc[-1]
+        return {
+            "source": "live",
+            "date": str(signals.index[-1])[:10],
+            "method": config.REGIME_METHOD,
+            "regime": str(row["regime"]),
+            "rsi": _f(row.get("rsi")),
+            "tqqq_alloc": _f(row.get("tqqq_alloc")) or 0.0,
+            "sqqq_alloc": _f(row.get("sqqq_alloc")) or 0.0,
+            "cash_alloc": _f(row.get("cash_alloc")) or 0.0,
+            "mom": _f(row.get("mom")),
+            "vol": _f(row.get("vol")),
+            "vol_ratio": _f(row.get("vol_ratio")),
+            "vol_alloc": _f(row.get("vol_alloc")),
+            "dip_buy": bool(row["dip_buy"]) if "dip_buy" in row and row["dip_buy"] == row["dip_buy"] else False,
+        }
+    except Exception as e:
+        state = ptr.load_bot_state() or {}
+        last_run = state.get("last_run") or ""
+        return {
+            "source": "cached",
+            "error": str(e),
+            "date": last_run.replace("T", " ")[:19] if isinstance(last_run, str) else "",
+            "method": config.REGIME_METHOD,
+            "regime": str(state.get("last_regime", "unknown")),
+            "portfolio": state.get("portfolio"),
+        }
+
+
+_REGIME_COLOR = {"bull": "success", "bear": "danger", "neutral": "warning", "crisis": "danger"}
+
+
+def _step_row(step, inputs, rule, result):
+    """One row of the regime derivation table."""
+    return html.Tr([
+        html.Td(step, className="small fw-bold"),
+        html.Td(inputs, className="small"),
+        html.Td(rule, className="small text-muted"),
+        html.Td(result, className="small text-end fw-bold"),
+    ])
+
+
+def _build_regime_view(data):
+    """Render the current-day regime breakdown."""
+    regime = data.get("regime", "unknown")
+    color = _REGIME_COLOR.get(regime, "secondary")
+
+    # Header: big regime badge + target allocation summary.
+    tqqq_alloc = data.get("tqqq_alloc", 0.0)
+    cash_alloc = data.get("cash_alloc", 1.0 - tqqq_alloc - data.get("sqqq_alloc", 0.0))
+    rsi = data.get("rsi")
+
+    header_cards = dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.Div("Current Regime", className="text-muted small"),
+            html.H3(dbc.Badge(regime.upper(), color=color, className="px-3 py-2")),
+            html.Div(f"as of {data.get('date', '—')}", className="text-muted small"),
+        ]), color="dark", outline=True), width=3),
+        dbc.Col(kpi_card("Target TQQQ", f"{tqqq_alloc:.0%}",
+                         "leveraged long exposure", color), width=3),
+        dbc.Col(kpi_card("Target Cash", f"{cash_alloc:.0%}", "risk-off buffer"), width=3),
+        dbc.Col(kpi_card("TQQQ RSI", f"{rsi:.1f}" if rsi is not None else "—",
+                         f"< {config.RSI_DIP_BUY_THRESHOLD} → dip-buy" ), width=3),
+    ], className="g-2 mb-3")
+
+    # Cached fallback: no component detail available.
+    if data.get("source") != "live":
+        return html.Div([
+            dbc.Alert(
+                [html.Strong("Live computation unavailable — showing the bot's last saved regime. "),
+                 html.Span(f"({data.get('error', 'no live data')})")],
+                color="warning", className="py-2 small"),
+            header_cards,
+            html.P("The detailed step-by-step breakdown requires live market data "
+                   "(yfinance). Only the regime label and target are available from "
+                   "state.json.", className="text-muted small"),
+        ])
+
+    # mom_vol full breakdown (the active method).
+    if data.get("method") == "mom_vol":
+        return html.Div([header_cards, _build_mom_vol_breakdown(data)])
+
+    # Other methods: generic summary only.
+    return html.Div([
+        header_cards,
+        dbc.Alert(f"Detailed breakdown is implemented for the 'mom_vol' method. "
+                  f"Active method: '{data.get('method')}'.", color="info",
+                  className="py-2 small"),
+    ])
+
+
+def _build_mom_vol_breakdown(data):
+    """Step-by-step derivation table + plain-English notes for the mom_vol method."""
+    mom = data.get("mom")
+    vol = data.get("vol")
+    vol_ratio = data.get("vol_ratio")
+    vol_alloc = data.get("vol_alloc")
+    rsi = data.get("rsi")
+    dip_buy = data.get("dip_buy", False)
+    tqqq_alloc = data.get("tqqq_alloc", 0.0)
+    regime = data.get("regime", "bear")
+    bull = regime == "bull"
+
+    floor, ceiling = config.VOL_FLOOR, config.VOL_CEILING
+    neg_scale = config.MOM_NEGATIVE_SCALE
+
+    def pct(x, nd=1):
+        return f"{x*100:.{nd}f}%" if x is not None else "—"
+
+    def num(x, nd=4):
+        return f"{x:.{nd}f}" if x is not None else "—"
+
+    # Step 1 — momentum gate
+    mom_result = dbc.Badge("BULL (mom > 0)" if bull else "BEAR (mom ≤ 0)",
+                           color="success" if bull else "danger", className="small")
+    step1 = _step_row(
+        f"1. Momentum gate",
+        f"QQQ {config.MOM_LOOKBACK}-day return = {pct(mom, 2)}",
+        f"mom > 0 → bull, else bear",
+        mom_result)
+
+    # Step 2 — volatility ratio
+    step2 = _step_row(
+        "2. Volatility",
+        f"QQQ {config.VOL_LOOKBACK}-day σ = {num(vol)} → ratio vs median = "
+        f"{num(vol_ratio, 2)}×",
+        f"clamp to [{floor:.1f}, {ceiling:.1f}]",
+        f"{num(vol_ratio, 2)}×")
+
+    # Step 3 — vol-scaled allocation
+    step3 = _step_row(
+        "3. Vol-scaled allocation",
+        f"({ceiling:.1f} − clip({num(vol_ratio,2)})) / ({ceiling:.1f} − {floor:.1f})",
+        f"100% at ≤{floor:.1f}×, 0% at ≥{ceiling:.1f}×",
+        pct(vol_alloc))
+
+    # Step 4 — apply momentum gate to allocation
+    gate_calc = (f"= vol_alloc = {pct(vol_alloc)}" if bull
+                 else f"= {neg_scale:g} × vol_alloc = {neg_scale:g} × {pct(vol_alloc)}")
+    gated = (vol_alloc if bull else (neg_scale * vol_alloc if vol_alloc is not None else None))
+    step4 = _step_row(
+        "4. Momentum scaling",
+        gate_calc,
+        f"bull → full; bear → ×{neg_scale:g} (soft exit)",
+        pct(gated))
+
+    # Step 5 — RSI dip-buy override
+    dip_condition = f"mom ≤ 0 AND RSI {num(rsi,1) if rsi else '—'} < {config.RSI_DIP_BUY_THRESHOLD}"
+    step5 = _step_row(
+        "5. RSI dip-buy override",
+        dip_condition,
+        f"if oversold in bear → force {config.RSI_DIP_BUY_ALLOC:.0%}",
+        dbc.Badge("TRIGGERED" if dip_buy else "not triggered",
+                  color="warning" if dip_buy else "secondary", className="small"))
+
+    # Step 6 — final target
+    step6 = _step_row(
+        "6. Final TQQQ target",
+        "after all steps" + (" (overlays OFF)" if not getattr(config, "VOL_TARGET_ENABLED", False) else ""),
+        "→ TQQQ allocation",
+        dbc.Badge(f"{tqqq_alloc:.0%}", color="primary", className="small"))
+
+    table = dbc.Table([
+        html.Thead(html.Tr([
+            html.Th("Step", className="small"), html.Th("Inputs", className="small"),
+            html.Th("Rule", className="small"), html.Th("Result", className="small text-end"),
+        ])),
+        html.Tbody([step1, step2, step3, step4, step5, step6]),
+    ], bordered=True, hover=True, color="dark", size="sm", striped=True)
+
+    notes = dbc.Card(dbc.CardBody([
+        html.H6("How the regime is calculated", className="text-light"),
+        html.Ul([
+            html.Li([html.Strong("Regime = sign of momentum. "),
+                     f"'bull' when QQQ's {config.MOM_LOOKBACK}-day return is positive, "
+                     "otherwise 'bear'. This method never uses SQQQ — you're long TQQQ or in cash."],
+                    className="small"),
+            html.Li([html.Strong("Size by volatility. "),
+                     f"The target scales from 100% (calm: vol ≤ {floor:.1f}× its median) down to "
+                     f"0% (turbulent: vol ≥ {ceiling:.1f}×), linearly in between."],
+                    className="small"),
+            html.Li([html.Strong("Momentum gate. "),
+                     f"In a bull regime you get the full vol-scaled size; in a bear regime it's "
+                     f"cut to {neg_scale:g}× (a soft exit, not a hard sell)."],
+                    className="small"),
+            html.Li([html.Strong("Dip-buy exception. "),
+                     f"If momentum is negative but TQQQ RSI is below {config.RSI_DIP_BUY_THRESHOLD} "
+                     f"(oversold), the target is forced to {config.RSI_DIP_BUY_ALLOC:.0%} to buy the dip."],
+                    className="small"),
+        ], className="mb-0"),
+    ]), color="dark", outline=True, className="mt-3")
+
+    return html.Div([table, notes])
 
 
 # --- Helper Functions ---

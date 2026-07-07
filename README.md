@@ -177,9 +177,25 @@ TradingStrategy1/
 
 ## Dashboard
 
-Runs at `http://127.0.0.1:8050` (or `0.0.0.0:8050` when deployed). Organized into three tabs:
+Runs at `http://127.0.0.1:8050` (or `0.0.0.0:8050` when deployed). Organized into four tabs
+(default view is **Trading Confirmations**):
 
-**1. Backtesting**
+**1. Trading Confirmations** — live Alpaca paper-bot status, read from
+`paper_trade/state.json` and `paper_trade/logs/trade_*.log`:
+- **Portfolio summary** at the top — equity, day P&L, **total / realized / unrealized P&L**, cash, and TQQQ/SQQQ positions
+- **Bot status** — last run, regime, trailing-stop state, portfolio peak
+- **Order confirmations table** — each event with a verbose **Detail** (rebalance allocation transition, protective-stop trail % + floor, or a stop-loss trigger with its fill price), plus **submitted / average fill price** and **slippage**
+
+**2. Regime** — the current-day regime calculation with a full component breakdown.
+Computes live via the same signal engine as the bot (`indicators.generate_signals`,
+unshifted), falling back to the bot's last saved regime (`state.json`) if the data
+download fails. Shows the momentum gate, volatility ratio, vol-scaled allocation, the
+momentum scaling, the RSI dip-buy check, and the resulting TQQQ/cash target, with a
+plain-English explanation of each step.
+
+**3. Logs** — browse the bot's monthly trade logs directly in the UI.
+
+**4. Backtesting**
 - **Equity curve** — strategy vs buy-and-hold, with regime shading (green/yellow/red) and
   **buy / sell / rebalance markers overlaid directly on the curve** (green ▲ buy,
   red ▼ sell/rebalance, yellow ✕ trailing-stop exit; hover shows the exact signal)
@@ -189,17 +205,7 @@ Runs at `http://127.0.0.1:8050` (or `0.0.0.0:8050` when deployed). Organized int
 - **Trade log** — every trade with execution price, allocation changes, cash, gain/loss
 - **Date picker** — select any period (auto-downloads missing data); a
   "Data current → YYYY-MM-DD" indicator and 6-hour auto-refresh keep the cache fresh
-
 - **3-week KPIs** — rolling 15-day worst-window and win-rate for short-horizon visibility
-
-**2. Trading Confirmations** — live Alpaca paper-bot status, read from
-`paper_trade/state.json` and `paper_trade/logs/trade_*.log`:
-- **Portfolio summary** at the top — equity, cash, TQQQ/SQQQ positions, and P&L since the last run
-- **Bot status** — last run, regime, trailing-stop state, portfolio peak
-- **Order confirmations table** — each order with its **submitted (reference) price**,
-  **average fill price**, and **slippage**
-
-**3. Logs** — browse the bot's monthly trade logs directly in the UI.
 
 ## Configuration
 

@@ -330,6 +330,15 @@ def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, 
         oversold_bear = (mom <= 0) & (df["rsi"] < config.RSI_DIP_BUY_THRESHOLD)
         alloc[oversold_bear] = config.RSI_DIP_BUY_ALLOC
 
+        # Diagnostic components (unshifted) so the dashboard can explain exactly
+        # how the current-day regime/allocation was derived. These are purely
+        # informational and don't affect the backtest.
+        df["mom"] = mom
+        df["vol"] = vol
+        df["vol_ratio"] = vol_ratio
+        df["vol_alloc"] = vol_alloc
+        df["dip_buy"] = oversold_bear
+
         # Short-horizon risk overlays (vol-targeting / cooldown / cap). Causal:
         # applied pre-shift, so still acted on at the next open (no look-ahead).
         alloc = apply_short_horizon_overlays(alloc, vol)

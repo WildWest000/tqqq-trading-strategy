@@ -257,8 +257,9 @@ def download_ticker(ticker: str, start: str, end: str, status_callback=None) -> 
     else:
         combined = cached if cached is not None else pd.DataFrame()
     
-    # Filter to requested range
+    # Ensure datetime index
     if len(combined) > 0:
+        combined.index = pd.to_datetime(combined.index)
         mask = (combined.index >= start) & (combined.index <= end)
         return combined.loc[mask]
     return combined

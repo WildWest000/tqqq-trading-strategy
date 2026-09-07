@@ -268,6 +268,10 @@ def generate_signals(tqqq: pd.DataFrame, sqqq: pd.DataFrame, qqq: pd.DataFrame, 
     - signal: human-readable signal description
     - regime: 'bull', 'bear', or 'neutral'
     """
+    # Ensure indexes are datetime-like to avoid string dates
+    tqqq.index = pd.to_datetime(tqqq.index)
+    sqqq.index = pd.to_datetime(sqqq.index)
+    qqq.index = pd.to_datetime(qqq.index)
     df = pd.DataFrame(index=tqqq.index)
     df["tqqq_close"] = tqqq["Close"]
     df["tqqq_open"] = tqqq["Open"] if "Open" in tqqq.columns else tqqq["Close"]
